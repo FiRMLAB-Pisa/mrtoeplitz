@@ -145,3 +145,33 @@ def test_a_streamed_transfer_is_differentiable(resident):
 def test_a_kernel_built_without_a_policy_holds_none(radial):
     kernel = mt.scalar_kernel(radial(n_spokes=12, n_samples=16), (8, 8))
     assert kernel.streaming is None
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_the_streamed_lane_agrees_with_itself_over_many_applications(resident):
+    """A stream-ordering fault shows up as a rate, not as a failure.
+
+    The chunk loop runs on side streams over tensors the default stream wrote,
+    and unordered it can read them before they are finished -- a wrong answer
+    rather than a slow one, and an intermittent one.
+
+    It takes a few hundred applications to appear: the first disagreement in
+    the run that found it was the 104th, after which it settled at 13%. Sixty
+    trials pass with the fault still in, so this is deliberately long rather
+    than trimmed to something quicker that would not catch it. It costs
+    nothing where there is no CUDA device, which is where CI runs.
+    """
+    trajectory, _, _ = resident
+    worst = 0.0
+    for _ in range(400):
+        policy = mt.CudaStreaming(streams=2, transfer_precision="float32")
+        kernel = mt.scalar_kernel(trajectory, (32, 32), options=WHOLE, streaming=policy)
+        image = torch.randn(1, 1, 32, 32, dtype=torch.complex64, requires_grad=True)
+        seed = torch.randn(1, 1, 32, 32, dtype=torch.complex64)
+        kernel(image).backward(seed)
+        with torch.no_grad():
+            expected = kernel(seed)
+        error = torch.linalg.vector_norm(image.grad - expected)
+        worst = max(worst, float(error / torch.linalg.vector_norm(expected)))
+    assert worst < 1e-5

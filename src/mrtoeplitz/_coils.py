@@ -119,8 +119,8 @@ class CoilKernels:
     batch at a time, so nothing else has to change to use one.
 
     Indexing acts on the leading axes and materialising acts on the spatial
-    ones, so the two commute: ``kernels[i]`` is exactly the ``i``-th map of
-    ``kernels.materialize()``, and neither ever forms the coils it was not
+    ones, so the two commute: ``coil_kernels[i]`` is exactly the ``i``-th map of
+    ``coil_kernels.materialize()``, and neither ever forms the coils it was not
     asked for.
 
     Parameters
@@ -148,15 +148,15 @@ class CoilKernels:
     >>> import torch
     >>> import mrtoeplitz as mt
     >>> maps = torch.ones(8, 64, 64, dtype=torch.complex64)
-    >>> kernels = mt.CoilKernels.from_maps(maps, (12, 12))
+    >>> coil_kernels = mt.CoilKernels.from_maps(maps, (12, 12))
 
     It stands in for the bank it came from, and holds a fraction of it:
 
-    >>> kernels.shape
+    >>> coil_kernels.shape
     (8, 64, 64)
-    >>> kernels[0:2].shape
+    >>> coil_kernels[0:2].shape
     torch.Size([2, 64, 64])
-    >>> round(kernels.compression_ratio, 1)
+    >>> round(coil_kernels.compression_ratio, 1)
     28.4
     """
 

@@ -1767,6 +1767,16 @@ class CompactToeplitzKernel:
         streams = workspace["streams"]
         host_rows = workspace["host_rows"]
         pending = [False] * policy.streams
+
+        # Everything the chunk loop reads -- `supported` above all -- was
+        # written on the default stream, and a side stream is not ordered
+        # behind it. Without this the transfer's chunks can be multiplied into
+        # a half-written spectrum, which is a wrong answer rather than a slow
+        # one, and an intermittent one because it depends on how the two
+        # streams interleave.
+        entry_stream = torch.cuda.current_stream(policy.torch_device)
+        for stream in streams:
+            stream.wait_stream(entry_stream)
         if fused_packed:
             resident_packed = workspace["resident_packed"]
             if resident_packed is not None:
@@ -1811,6 +1821,11 @@ class CompactToeplitzKernel:
             for output_coefficient in range(self.rank):
                 output_supported = workspace["output_supported"]
                 assert output_supported is not None
+                # Each pass rewrites `output_supported` on the side streams
+                # while the default stream may still be reading what the last
+                # pass left there.
+                for stream in streams:
+                    stream.wait_stream(torch.cuda.current_stream(policy.torch_device))
                 for chunk_index, start in enumerate(
                     range(0, self.n_locations, chunk_size)
                 ):

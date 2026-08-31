@@ -109,8 +109,8 @@ a time. Nothing is approximated, and at 320³ with 48 channels it is 12.6 GB of
 maps against a fraction of a megabyte.
 
 ```python
-kernels = mt.CoilKernels(calibration_kernels, image_shape=(320, 320, 320))
-normal = mt.apply_sense(kernel, image, kernels)
+coil_kernels = mt.CoilKernels(calibration, image_shape=(320, 320, 320))
+normal = mt.apply_sense(kernel, image, coil_kernels)
 ```
 
 If only dense maps survive, `from_maps(maps, tolerance=1e-3)` finds the
