@@ -263,3 +263,25 @@ def test_compression_costs_a_weighted_transfer_more_than_an_unweighted_one(
     compressed, whole = error(True), error(False)
     assert whole < 1e-4
     assert compressed > 4 * whole
+
+
+def test_the_default_cuda_lane_is_the_low_memory_one(radial):
+    """Memory is the scarce thing, on a large card as much as a small one.
+
+    ``"auto"`` takes resident banks whenever they fit inside the device
+    fraction, which leaves the rest of a reconstruction -- maps, iterates, a
+    denoiser -- competing for what is left. The default keeps the operator's
+    footprint predictable instead.
+    """
+    assert mt.toeplitz_options()["cuda_mode"] == "compact"
+    kernel = mt.scalar_kernel(radial(), (32, 32))
+    holder = kernel.components[0][1] if hasattr(kernel, "components") else kernel
+    assert holder.cuda_mode == "compact"
+
+
+def test_a_streaming_policy_keeps_its_transfer_on_the_host_by_default():
+    """The point of streaming is that the transfer is not on the device."""
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    assert mt.CudaStreaming(device="cuda").kernel_residency == "host"

@@ -54,7 +54,7 @@ class CudaStreaming:
     pin_memory: bool = True
     transfer_chunk_size: int = 1048576
     physics_batch_size: int = 1
-    kernel_residency: str = "auto"
+    kernel_residency: str = "host"
     transfer_precision: str = "auto"
     max_device_fraction: float = 0.85
 

@@ -20,6 +20,9 @@ doubled grid — on by default here, so the doubled grid is never materialised.
 
 **Added here:**
 
+- **Low memory by default** — the packed lane, not resident banks on the
+  doubled grid, so the operator's footprint stays predictable and the rest of
+  a reconstruction keeps its room
 - **bfloat16 transfers**, halving what the card holds and what crosses the bus
 - **Dual-stream host staging** — a transfer larger than the card stays in
   pinned host memory and arrives in chunks, the copy of one overlapping the

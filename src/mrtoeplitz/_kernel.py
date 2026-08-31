@@ -750,7 +750,7 @@ class CompactToeplitzKernel:
         *,
         image_shape: tuple[int, ...] | None = None,
         chunk_size: int = 65536,
-        cuda_mode: str = "auto",
+        cuda_mode: str = "compact",
         cuda_max_device_fraction: float = 0.85,
         host_dense: str = "auto",
         host_max_memory_fraction: float = 0.5,

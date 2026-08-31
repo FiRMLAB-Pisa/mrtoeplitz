@@ -15,7 +15,7 @@ def _toeplitz_options(
     polyphase: bool | str = True,
     chunk_size: int = 65536,
     coil_batch_size: int = 1,
-    cuda_mode: str = "auto",
+    cuda_mode: str = "compact",
     cuda_max_device_fraction: float = 0.85,
     cuda_transfer_precision: str = "auto",
 ) -> dict[str, Any]:
@@ -36,6 +36,14 @@ def _toeplitz_options(
     truncation bound. A conjugate-gradient solve that meets the resulting
     indefiniteness stops on its last valid iterate rather than diverging. A
     calibration solved over a small window keeps the whole transfer instead.
+
+    ``cuda_mode`` chooses the CUDA lane. The default is ``"compact"``: the
+    transfer is applied out of its packed form, so what the device holds is
+    the transfer and one working buffer. ``"resident"`` materialises batched
+    banks on the doubled grid instead, which is faster where there is room for
+    them and impossible where there is not, and ``"auto"`` takes the banks
+    whenever they fit. Compact is the default because memory is the scarce
+    thing this package exists to save, on a large card as much as a small one.
 
     ``polyphase`` files the transfer as one component per parity of the
     doubled grid's coordinates, so the convolution runs on the image grid and
