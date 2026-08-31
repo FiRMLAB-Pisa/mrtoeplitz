@@ -30,3 +30,10 @@ data/
 # scikit-build-core's build tree
 build/
 _skbuild/
+
+# Benchmark datasets, fetched from Zenodo at run time (see benchmarks/delics.py).
+# `data/` above already covers the default location; these catch an archive
+# left in the tree by an interrupted fetch.
+*.tar.gz
+*.tar.gz.part
+*.tar.gz.verified
