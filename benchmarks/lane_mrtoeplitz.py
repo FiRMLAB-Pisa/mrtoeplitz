@@ -74,6 +74,7 @@ def main() -> None:
     parser.add_argument("--size", type=int, required=True)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--maps", required=True)
+    parser.add_argument("--streaming", action="store_true")
     arguments = parser.parse_args()
 
     shape = (arguments.size,) * 3
@@ -103,12 +104,24 @@ def main() -> None:
         trajectory = torch.as_tensor(trajectory).cuda()
         density = torch.as_tensor(density).cuda()
 
+    # Streaming is not only for an apply that will not fit. Given a policy,
+    # the build stages each basis pair's retained values to pinned host memory
+    # as it computes them, so the transfer never accumulates on the card --
+    # only the one doubled-grid buffer the gridding reuses. Without it the ten
+    # pairs pile up on the device alongside that buffer.
+    policy = (
+        mt.CudaStreaming(device="cuda", streams=2)
+        if arguments.device == "cuda" and arguments.streaming
+        else None
+    )
+
     start = clock()
     kernel = mt.subspace_kernel(
         trajectory,
         acquisition.basis,
         shape,
         density=density,
+        streaming=policy,
     )
     seconds["create"] = clock() - start
     extra = {"transfer_bytes": float(kernel.storage_nbytes)}
@@ -126,7 +139,15 @@ def main() -> None:
     image = torch.zeros(
         (1, rank, *shape), dtype=torch.complex64, device=arguments.device
     )
-    sensitivities = torch.as_tensor(maps).to(arguments.device)
+    # Eight coil kernels and one map in flight, not a bank of eight. At this
+    # size the dense bank is 1.07 GiB on the card; the kernels are a quarter
+    # of a megabyte and a coil is expanded when the apply asks for it. These
+    # maps floor at about 5e-3 however large the kernel, that residual being
+    # the eigenvector normalisation's edge rather than the sensitivity, so
+    # there is nothing to buy above a small one.
+    sensitivities = mt.CoilKernels.from_maps(
+        torch.as_tensor(maps), (16,) * 3
+    ).to(arguments.device)
 
     def apply():
         return mt.apply_sense(kernel, image, sensitivities, coil_batch_size=1)
