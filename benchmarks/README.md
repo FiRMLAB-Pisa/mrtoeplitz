@@ -38,43 +38,51 @@ device:
 
 | | one unit | x 32 volumes |
 |---|---|---|
-| CUDA, padded 512³ | 69.9 ms | 2237 ms |
-| CUDA, parity 8x256³ | 67.2 ms | **2149 ms** |
+| CUDA, padded 384³ | 1334–1357 ms, or 1020 ms | |
+| CUDA, parity 8x192³ | **1017–1020 ms** | |
 | CPU, padded 512³ | 1093 ms | 34988 ms |
-| CPU, parity 8x256³ | 657 ms | **21020 ms** |
+| CPU, parity 8x256³ | **657 ms** | 21020 ms |
 
-The parity layout is 4% cheaper on CUDA and **1.66x** cheaper on CPU. Its
-memory advantage is the same on both; its runtime advantage is not.
+At 192³ on CUDA the parity layout is steady at 1019 ms every time, while the
+padded one is usually 1.32x slower and occasionally lands at exactly parity's
+speed -- four runs gave 1.31x, 1.32x, 1.33x and 1.00x. That is cuFFT choosing
+differently for the awkward 384³ depending on the workspace it finds. So the
+decomposition is not only cheaper on average but predictable, which is the
+better property of the two. On CPU it is **1.66x** cheaper outright.
 
 ## Results
 
 Deli-CS, 500 frames x 8 shots x 1688 points, 48 channels compressed to 8,
 rank 4, 256³, in low-memory mode. RTX 4060 Laptop, 8 GiB.
 
-### CUDA
+### CUDA, 192³ — where there is room
 
 | | RAM | VRAM | `A^H y` | create | apply |
 |---|---|---|---|---|---|
-| floor | 643 MiB | 3185 MiB | — | — | 2103–2149 ms |
-| mrtoeplitz | 10733–12828 MiB | 7759–7879 MiB | 12090–13277 ms | 16786–88831 ms | **5143–27949 ms** |
+| floor | 644 MiB | 1409 MiB | — | — | 1019 ms |
+| mrtoeplitz | 5748 MiB | 7117 MiB | 7406 ms | 10137 ms | **2365 ms** |
 
-**The apply is not reproducible at this size and no ratio to the floor is
-quoted from it.** Three runs of the same work gave 5143, 17992 and 27949 ms
-while device memory crept from 7759 to 7879 MiB of an 8188 MiB card. The
-operator is at the edge of the card, so what varies is how much room the apply
-finds, not what it computes. Building the transfer on the device rather than
-on the host and moving it makes creation 4.6x faster (88.8 s to 19.5 s) and is
-the right way to build it; it does not account for the spread in the apply,
-and neither does releasing the allocator between the two, which was tried and
-made no difference.
+**2.32x the floor**, and it replicates: two runs gave 2365.1 and 2365.7 ms.
 
-At 128³, where there is room, the same comparison is stable and the two ways
-of building are indistinguishable in the apply: 428 ms host-built against
-407 ms device-built, identical storage, dtype and lane.
+VRAM here is peak *occupancy*, not the live set. The transfer is about 1.2 GiB
+and a coefficient volume 227 MiB, so most of the 7117 MiB is Torch's caching
+allocator having grown during the build and not returned it. Occupancy is
+still what decides whether anything else fits on the card, which is why it is
+the number reported, but it is not what the operator holds.
 
-A trustworthy number at 256³ needs either a card this configuration fits
-inside with room to spare, or less pressure on this one -- fewer coils
-resident, or sensitivities held as kernels rather than as maps.
+### CUDA, 256³ — where there is not
+
+| | VRAM | apply |
+|---|---|---|
+| floor | 3185 MiB | 2103–2149 ms |
+| mrtoeplitz | 7759–7894 MiB | **5143–55828 ms** |
+
+**No ratio is quoted.** Across runs differing only in where the transfer was
+built and whether it was streamed, the apply measured 5143, 17992, 27377,
+27949 and 55828 ms, and `A^H y` 11345 to 40076 ms. The transfer alone is
+2.84 GiB and the floor needs 3.19 GiB of an 8188 MiB card. What varies is how
+much room the apply finds, not what it computes -- which is the finding, and
+the reason 192³ is the size reported above.
 
 ### CPU
 
