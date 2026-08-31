@@ -165,8 +165,7 @@ def _band_limited(coils=4, side=10, grid=64, seed=0):
     """A bank that is band-limited by construction, as an NLINV map is."""
     rng = np.random.default_rng(seed)
     seed_kernels = torch.as_tensor(
-        rng.normal(size=(coils, side, side))
-        + 1j * rng.normal(size=(coils, side, side))
+        rng.normal(size=(coils, side, side)) + 1j * rng.normal(size=(coils, side, side))
     ).to(torch.complex64)
     return mt.CoilKernels(seed_kernels, (grid, grid)).materialize()
 
