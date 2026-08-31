@@ -100,20 +100,22 @@ kernel = mt.cartesian_subspace_kernel(masks, basis)
 normal = mt.apply_sense(kernel, image, maps)
 ```
 
-For arrays too large to hold as maps, pass k-space kernels instead — the
-largest saving here, since a bank is gigabytes where a transfer is megabytes.
-They stand in for the dense bank — shape, rank and coil slicing all answer as
-the tensor would — and only the coils asked for are expanded.
+A sensitivity is smooth — which is why a calibration is solved on a
+low-resolution ACS region in the first place. What NLINV solves for *is* a
+small array of k-space coefficients; the dense map is that array zero-padded
+and transformed. `CoilKernels` holds the coefficients and defers the padding
+to the coils a call asks for, which a SENSE normal already reads one batch at
+a time. Nothing is approximated, and at 320³ with 48 channels it is 12.6 GB of
+maps against a fraction of a megabyte.
 
 ```python
-kernels = mt.CoilKernels.from_maps(maps, tolerance=1e-3)
+kernels = mt.CoilKernels(calibration_kernels, image_shape=(320, 320, 320))
 normal = mt.apply_sense(kernel, image, kernels)
 ```
 
-Sound only for band-limited maps, so the size is measured rather than guessed:
-`tolerance` picks the smallest kernel that holds the bank to it, and refuses
-a bank that has none. On NLINV maps that is 114× smaller; ESPIRiT's manage 2×,
-and a simulated array is refused.
+If only dense maps survive, `from_maps(maps, tolerance=1e-3)` finds the
+smallest kernel that holds them to that — 114× on NLINV maps, 2× on ESPIRiT's,
+and a refusal for a bank with no such kernel.
 
 ![sensitivities as k-space kernels](examples/figures/coil_kernels.png)
 

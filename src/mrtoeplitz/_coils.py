@@ -1,17 +1,20 @@
 """Sensitivities held as k-space kernels rather than as maps.
 
-A SENSE normal reads one coil at a time. It never needs the whole bank at
-once, but the bank is what gets stored: at 320 cubed with 48 channels, complex
-single-precision maps are 12.6 GB, which on most cards is the reconstruction.
+A sensitivity is smooth. That is why a calibration is solved on a
+low-resolution ACS region at all, and it means the natural form of a
+sensitivity is a small array of k-space coefficients rather than a map: what
+NLINV solves for *is* that array, and the dense map is it zero-padded to the
+image grid and transformed.
 
-A sensitivity is smooth, so its k-space support is small. Holding the kernels
-instead -- ``(coils, *kernel_shape)`` with each kernel side a few tens of
-cells -- and expanding one coil back to the image grid when the apply asks for
-it trades that bank for a single map in flight, which the apply already holds.
-The same 48 channels at a 16-cubed kernel are 1.6 MB.
+So forming the map is a choice, and an expensive one -- at 320 cubed with 48
+channels, complex single-precision maps are 12.6 GB, which on most cards is
+the reconstruction. Holding the coefficients instead and expanding one coil
+when the apply asks for it defers the padding, and a SENSE normal reads a bank
+one coil batch at a time anyway. Nothing is approximated by this: nothing has
+been truncated.
 
-This is riesling's low-memory mode, and its one requirement is the whole
-design: **the map must already be band-limited.** See :meth:`CoilKernels.from_maps`.
+This is riesling's low-memory mode. :meth:`CoilKernels.from_maps` covers the
+other direction, for when the coefficients are gone and only maps remain.
 """
 
 from __future__ import annotations
@@ -192,9 +195,13 @@ class CoilKernels:
         tolerance: float | None = None,
         spatial_ndim: int | None = None,
     ) -> CoilKernels:
-        """Truncate a dense map bank to its central k-space kernels.
+        """Reduce a dense map bank to central k-space kernels.
 
-        **Only sound for maps that are already band-limited.** NLINV's are, by
+        The fallback, not the path: where a calibration's coefficients are to
+        hand, pass them to :class:`CoilKernels` directly and no truncation
+        arises. This is for a bank that reaches you already padded.
+
+        **Only sound for maps that are still band-limited.** NLINV's are, by
         construction: its Sobolev weighting is a band limit, and BART already
         stores those maps as k-space coefficients. ESPIRiT's are not, once the
         eigenvector normalisation has been applied -- the ``|m| = 1`` mask puts
