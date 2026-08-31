@@ -51,22 +51,25 @@ bound can still compute the wrong operator.
 ### Subspace
 
 A subspace normal costs one gridding transform per basis **pair** —
-`rank (rank + 1) / 2` of them — over every frame's samples concatenated. Not
-one per frame, which for a fingerprinting scan is a thousand.
-
-You group the frames onto the distinct trajectories they were acquired on,
-because only you know which frames share a plan:
+`rank (rank + 1) / 2` of them — over every frame's samples at once. Not one per
+frame, which for a fingerprinting scan is a thousand.
 
 ```python
-rows, columns = torch.triu_indices(rank, rank)
-blocks = [
-    # (samples, density, upper-triangular basis products summed over the
-    #  frames that share this trajectory)
-    (samples_t, None, basis[rows, t] * basis[columns, t].conj())
-    for t, samples_t in enumerate(trajectories)
-]
-kernel = mt.subspace_kernel(blocks, image_shape=(256, 256))
+kernel = mt.subspace_kernel(trajectory, basis, image_shape=(256, 256))
 ```
+
+- `trajectory` is `(shots, points, axes)` when every frame shares one, or
+  `(frames, shots, points, axes)` when they differ. Samples in the
+  `[-0.5, 0.5)` units MRI-NUFFT expects, unscaled by the grid.
+- `basis` is `(frames, rank)` or `(rank, frames)`, whichever way round. That
+  axis is contrasts for a qMRI scan (MRF, FSE) and time for a dynamic one
+  (cardiac); nothing here needs to know which.
+- `density` is optional and broadcasts: `(points,)`, `(shots, points)` or
+  `(frames, shots, points)`.
+
+Frames acquired on the same trajectory are grouped before anything is gridded,
+so a scan whose 1000 frames cycle through 8 rotations grids those 8 — not 1000
+copies of them.
 
 A Cartesian encoding needs no gridding and no doubled grid — the normal is the
 sampling mask itself:

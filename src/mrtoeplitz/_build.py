@@ -489,7 +489,7 @@ def _subspace_pair_transfers(
     return packed, dropped
 
 
-def subspace_kernel(
+def _subspace_kernel_from_blocks(
     blocks: Sequence[tuple[Any, Any, Any]],
     image_shape: tuple[int, ...],
     *,
@@ -497,44 +497,13 @@ def subspace_kernel(
     options: dict[str, Any] | None = None,
     streaming: Any | None = None,
 ) -> CompactToeplitzKernel:
-    """Grid one transfer per basis pair and pack them as coefficient matrices.
+    """Grid one transfer per basis pair, over pre-grouped trajectory blocks.
 
-    A subspace normal costs ``rank (rank + 1) / 2`` gridding transforms, each
-    the adjoint of one weight per sample over every frame's samples
-    concatenated -- never one transform per frame, which for a real
-    fingerprinting scan is a thousand of them.
-
-    Parameters
-    ----------
-    blocks
-        One entry per **distinct trajectory**, as
-        ``(samples, weights, coefficients)``. ``samples`` is that trajectory,
-        ``weights`` its density or ``None``, and ``coefficients`` the
-        upper-triangular basis product ``conj(U[i, t]) * U[j, t]`` summed over
-        the frames that share the trajectory, ordered as
-        ``torch.triu_indices(rank, rank)`` gives the pairs. Grouping frames
-        onto the trajectories they were acquired on is the caller's to do,
-        because only the caller knows which frames share a plan.
-    image_shape
-        The image grid. The transfer is built on twice this in every dimension.
-    backend
-        MRI-NUFFT backend used to grid the point spread function.
-    options
-        As :func:`toeplitz_options`.
-    streaming
-        Where a transfer too large for the device is staged. ``None`` keeps it
-        wherever it was built.
-
-    Returns
-    -------
-    CompactToeplitzKernel
-        The packed normal operator.
-
-    Raises
-    ------
-    ValueError
-        If ``blocks`` is empty, or the coefficient vectors do not all describe
-        one packed upper triangle.
+    The engine beneath :func:`subspace_kernel`, which is the entry point a
+    caller wants. Each block is ``(samples, weights, coefficients)`` for one
+    distinct trajectory, with ``coefficients`` the upper-triangular basis
+    products summed over the frames sharing it, ordered as
+    ``torch.triu_indices(rank, rank)`` gives the pairs.
     """
     torch = import_module("torch")
     options = _toeplitz_options() if options is None else options
@@ -589,6 +558,203 @@ def subspace_kernel(
     )
 
 
+def _basis_as_rank_by_frames(basis: Any, n_frames: int | None) -> Any:
+    """Return the basis as ``(rank, frames)``, whichever way round it came.
+
+    A subspace has fewer components than the dimension it compresses, so where
+    the trajectory does not settle the frame count the longer axis is the
+    frames. A square basis compresses nothing and is read as ``(frames, rank)``.
+    """
+    torch = import_module("torch")
+    basis = torch.as_tensor(basis)
+    if basis.ndim != 2:
+        raise ValueError(
+            f"basis must be (frames, rank) or (rank, frames), got shape "
+            f"{tuple(basis.shape)}"
+        )
+    if n_frames is not None:
+        if basis.shape[0] == n_frames and basis.shape[1] != n_frames:
+            return basis.T
+        if basis.shape[1] == n_frames:
+            return basis
+        raise ValueError(
+            f"basis {tuple(basis.shape)} has no axis matching the "
+            f"{n_frames} frames the trajectory carries"
+        )
+    return basis if basis.shape[0] < basis.shape[1] else basis.T
+
+
+def _trajectory_frames(
+    trajectory: Any,
+    image_ndim: int,
+) -> tuple[Any, int | None]:
+    """Split a trajectory into per-frame samples and the frame count it states.
+
+    ``(shots, points, axes)`` is one trajectory every frame shares and states
+    no count; ``(frames, shots, points, axes)`` states one.
+    """
+    trajectory = as_torch(trajectory)
+    if trajectory.shape[-1] != image_ndim:
+        raise ValueError(
+            f"trajectory's last axis is the {trajectory.shape[-1]} spatial "
+            f"axes it names, which must match the {image_ndim}-dimensional "
+            f"image grid"
+        )
+    if trajectory.ndim == 3:
+        return trajectory.reshape(-1, image_ndim)[None], None
+    if trajectory.ndim == 4:
+        n_frames = int(trajectory.shape[0])
+        return trajectory.reshape(n_frames, -1, image_ndim), n_frames
+    raise ValueError(
+        f"trajectory must be (shots, points, axes) or "
+        f"(frames, shots, points, axes), got shape {tuple(trajectory.shape)}"
+    )
+
+
+def _grouped_frames(samples: Any) -> dict[bytes, list[int]]:
+    """Group frames by the trajectory they were acquired on.
+
+    Frames that share a trajectory share the transform that grids it, so
+    carrying them separately multiplies the samples every basis pair is
+    gridded over -- a thousand times, for a fingerprinting scan whose frames
+    cycle through a handful of rotations.
+    """
+    import hashlib
+
+    groups: dict[bytes, list[int]] = {}
+    for frame in range(samples.shape[0]):
+        row = samples[frame].detach().cpu().contiguous()
+        digest = hashlib.blake2b(row.numpy().tobytes(), digest_size=16).digest()
+        groups.setdefault(digest, []).append(frame)
+    return groups
+
+
+def subspace_kernel(
+    trajectory: Any,
+    basis: Any,
+    image_shape: tuple[int, ...],
+    *,
+    density: Any | None = None,
+    backend: str = "finufft",
+    options: dict[str, Any] | None = None,
+    streaming: Any | None = None,
+) -> CompactToeplitzKernel:
+    """Build the normal operator for a subspace-constrained acquisition.
+
+    A subspace normal costs ``rank (rank + 1) / 2`` gridding transforms -- one
+    per basis pair, over every frame's samples at once -- never one per frame,
+    which for a fingerprinting scan is a thousand of them. Frames acquired on
+    the same trajectory are grouped before any of that, so a scan whose frames
+    cycle through a handful of rotations grids those rotations once.
+
+    Parameters
+    ----------
+    trajectory
+        ``(shots, points, axes)`` for one trajectory every frame shares, or
+        ``(frames, shots, points, axes)`` for one per frame. ``axes`` is the
+        image's dimensionality, and the samples are in the ``[-0.5, 0.5)``
+        units MRI-NUFFT expects -- unscaled by the grid.
+    basis
+        ``(frames, rank)`` or ``(rank, frames)``, whichever way round. The
+        frames axis is contrasts for a qMRI scan and time for a dynamic one;
+        nothing here needs to know which.
+    image_shape
+        The image grid. The transfer is built on twice this in every dimension.
+    density
+        Sample weights, broadcastable to the trajectory without its axes --
+        ``(points,)``, ``(shots, points)`` or ``(frames, shots, points)``.
+        ``None`` weights every sample equally.
+    backend
+        MRI-NUFFT backend used to grid the point spread function.
+    options
+        As :func:`toeplitz_options`.
+    streaming
+        Where a transfer too large for the device is staged.
+
+    Returns
+    -------
+    CompactToeplitzKernel
+        The packed normal operator, taking ``(batch, rank, *image_shape)``.
+
+    Raises
+    ------
+    ValueError
+        If the trajectory's rank is neither three nor four, its last axis does
+        not match the image's dimensionality, the basis has no axis matching
+        the frames, or the density does not broadcast onto the samples.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import mrtoeplitz as mt
+    >>> angles = np.linspace(0, np.pi, 8, endpoint=False)
+    >>> radius = np.linspace(-0.5, 0.5, 32, endpoint=False)
+    >>> spokes = np.stack(
+    ...     [np.outer(np.cos(angles), radius), np.outer(np.sin(angles), radius)],
+    ...     axis=-1,
+    ... ).astype(np.float32)
+    >>> basis = np.eye(4, 16, dtype=np.float32)
+
+    One trajectory shared by all sixteen frames:
+
+    >>> kernel = mt.subspace_kernel(spokes, basis, (32, 32))
+    >>> kernel.rank
+    4
+    """
+    torch = import_module("torch")
+    options = _toeplitz_options() if options is None else options
+    image_shape = tuple(int(size) for size in image_shape)
+
+    samples, stated_frames = _trajectory_frames(trajectory, len(image_shape))
+    matrix = _basis_as_rank_by_frames(basis, stated_frames)
+    rank, n_frames = int(matrix.shape[0]), int(matrix.shape[1])
+
+    if stated_frames is None:
+        samples = samples.expand(n_frames, *samples.shape[1:])
+    elif stated_frames != n_frames:
+        raise ValueError(
+            f"the trajectory carries {stated_frames} frames and the basis {n_frames}"
+        )
+
+    weights = None
+    if density is not None:
+        weights = as_torch(density).reshape(-1)
+        per_frame = samples.shape[1]
+        if weights.numel() == per_frame:
+            weights = weights[None].expand(n_frames, per_frame)
+        elif weights.numel() == n_frames * per_frame:
+            weights = weights.reshape(n_frames, per_frame)
+        else:
+            raise ValueError(
+                f"density has {weights.numel()} weights, which is neither one "
+                f"per sample of a frame ({per_frame}) nor one per sample of "
+                f"the whole acquisition ({n_frames * per_frame})"
+            )
+
+    rows, columns = torch.triu_indices(rank, rank, device=matrix.device)
+    blocks = []
+    for members in _grouped_frames(samples).values():
+        coefficients = sum(
+            matrix[rows, frame] * matrix[columns, frame].conj() for frame in members
+        )
+        first = members[0]
+        blocks.append(
+            (
+                samples[first],
+                None if weights is None else weights[first],
+                coefficients,
+            )
+        )
+
+    return _subspace_kernel_from_blocks(
+        blocks,
+        image_shape,
+        backend=backend,
+        options=options,
+        streaming=streaming,
+    )
+
+
 def cartesian_subspace_kernel(
     masks: Any,
     basis: Any,
@@ -608,7 +774,7 @@ def cartesian_subspace_kernel(
         Sampling masks, ``(frames, *image_shape)`` or ``(1, *image_shape)`` for
         one mask shared by every frame. Centred, the way k-space is written.
     basis
-        The subspace basis, ``(rank, frames)``.
+        ``(frames, rank)`` or ``(rank, frames)``, whichever way round.
     options
         As :func:`toeplitz_options`.
     streaming
@@ -626,10 +792,11 @@ def cartesian_subspace_kernel(
     """
     torch = import_module("torch")
     options = _toeplitz_options() if options is None else options
-    basis = torch.as_tensor(basis)
+    masks = as_torch(masks)
+    stated_frames = int(masks.shape[0]) if masks.shape[0] > 1 else None
+    basis = _basis_as_rank_by_frames(basis, stated_frames)
     rank, n_frames = basis.shape
 
-    masks = as_torch(masks)
     if streaming is not None:
         masks = masks.to("cpu")
     image_shape = tuple(int(size) for size in masks.shape[1:])
