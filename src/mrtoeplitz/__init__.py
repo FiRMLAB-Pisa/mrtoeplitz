@@ -36,6 +36,7 @@ from ._kernel import (
     support_indices,
 )
 from ._sense import apply_sense
+from ._streaming import CudaStreaming
 
 try:
     __version__ = _distribution_version(__name__)
@@ -45,6 +46,7 @@ except PackageNotFoundError:  # a source tree that was never installed
 __all__ = [
     "CoilKernels",
     "CompactToeplitzKernel",
+    "CudaStreaming",
     "PolyphaseToeplitzKernel",
     "__version__",
     "apply_sense",
