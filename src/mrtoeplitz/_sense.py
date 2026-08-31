@@ -14,33 +14,31 @@ from importlib import import_module
 from types import SimpleNamespace
 from typing import Any
 
-from ._backend import _base_fourier_operator
 from ._coils import CoilKernels
 from ._kernel import CompactToeplitzKernel, _device_is_full, as_torch
 
 
-def _sense_maps(native_operator: Any, reference: Any) -> Any:
-    """Return sensitivity maps as a Torch tensor, on whatever device holds them.
+def _sense_maps(maps: Any, reference: Any, image_shape: tuple[int, ...]) -> Any:
+    """Return sensitivities as something the apply can slice coil-wise.
 
     A normal application reads one coil at a time, so maps the caller left on
     the host are staged coil by coil rather than moved whole -- the difference
-    is the whole bank against one map of it.
+    is the whole bank against one map of it. A :class:`CoilKernels` bank is
+    passed straight through: it already answers shape, rank and coil slicing
+    as the dense tensor would, and materialising it here to check would be the
+    whole point lost.
     """
     torch = import_module("torch")
-    base = _base_fourier_operator(native_operator)
-    maps = getattr(base, "smaps", None)
     if maps is None:
         return torch.ones(
-            (1, *base.shape),
+            (1, *image_shape),
             dtype=reference.dtype,
             device=reference.device,
         )
     if isinstance(maps, CoilKernels):
-        # Already answers shape, ndim and coil slicing as the dense bank would,
-        # and materialising it here to check that would be the whole point lost.
         return maps
     maps = as_torch(maps).to(reference.dtype)
-    spatial_ndim = len(base.shape)
+    spatial_ndim = len(image_shape)
     if maps.ndim == spatial_ndim:
         return maps[None]
     if maps.ndim in {spatial_ndim + 1, spatial_ndim + 2}:
@@ -100,21 +98,45 @@ def _coils_split_across_devices(
 def apply_sense(
     kernel: CompactToeplitzKernel,
     image: Any,
-    native_operator: Any,
+    maps: Any | None = None,
     *,
     right_factors: Any | None = None,
     left_factors: Any | None = None,
     coil_batch_size: int = 1,
     streaming: Any | None = None,
 ) -> Any:
-    """Apply a compact transfer between optional spatial factor banks."""
+    """Apply a transfer through coil sensitivities.
+
+    Parameters
+    ----------
+    kernel
+        The normal operator, from :func:`~mrtoeplitz.scalar_kernel` or a
+        subspace builder.
+    image
+        ``(batch, rank, *image_shape)``, complex.
+    maps
+        Sensitivities as ``(coils, *image_shape)``, with a leading batch axis,
+        or as a :class:`~mrtoeplitz.CoilKernels` bank. ``None`` applies the
+        normal without coils.
+    right_factors, left_factors
+        Spatial factors folded into the pass either side of the transfer.
+    coil_batch_size
+        Coils per pass. One keeps the least in flight.
+    streaming
+        Where a transfer too large for the device is staged.
+
+    Returns
+    -------
+    array
+        ``sum_c conj(m_c) N(m_c x)``, shaped like ``image``.
+    """
     torch = import_module("torch")
     if streaming is not None and streaming.device_count > 1:
         # Coils are independent until their final SENSE reduction.  Group at
         # least one coil per device so even a single-image reconstruction can
         # fan its Toeplitz work across a multi-GPU recon host.
         coil_batch_size = max(coil_batch_size, streaming.device_count)
-    maps = _sense_maps(native_operator, image)
+    maps = _sense_maps(maps, image, kernel.image_shape)
     # An image is (batch, *spatial) and unbatched maps are (coils, *spatial),
     # so the two carry the same rank; only the maps' own rank separates them.
     batched_maps = maps.ndim == len(kernel.image_shape) + 2

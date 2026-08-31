@@ -282,7 +282,9 @@ def occupancy_indices(
     Parameters
     ----------
     samples
-        Trajectory in the backend's ``[-pi, pi)`` units, ``(..., ndim)``.
+        Trajectory in the ``[-0.5, 0.5)`` units every entry point of this
+        package takes, ``(..., ndim)``. MRI-NUFFT rescales these to its own
+        ``[-pi, pi)`` internally; nothing here does.
     spatial_shape
         The transfer grid, twice the image in each dimension.
     width
@@ -305,9 +307,9 @@ def occupancy_indices(
         raise ValueError("samples must end in one coordinate per spatial axis")
     coordinates = coordinates.reshape(-1, ndim).to(torch.float32)
     sizes = torch.tensor(spatial_shape, device=coordinates.device)
-    # [-pi, pi) spans the grid, and the transfer is stored unshifted, so the
+    # [-0.5, 0.5) spans the grid, and the transfer is stored unshifted, so the
     # centre of k-space is index zero.
-    placed = torch.round(coordinates / (2.0 * torch.pi) * sizes).to(torch.int64)
+    placed = torch.round(coordinates * sizes).to(torch.int64)
 
     stride = torch.ones(ndim, dtype=torch.int64, device=coordinates.device)
     for axis in range(ndim - 2, -1, -1):

@@ -36,31 +36,34 @@ def device(request):
 
 @pytest.fixture
 def radial():
-    """A 2D radial trajectory, in the [-0.5, 0.5) units MRI-NUFFT expects."""
+    """A 2D radial trajectory as (shots, points, axes).
+
+    Samples are in the [-0.5, 0.5) units MRI-NUFFT expects -- unscaled by the
+    grid, which is what the builders take.
+    """
 
     def build(n_spokes=48, n_samples=64):
         angles = np.linspace(0, np.pi, n_spokes, endpoint=False)
         radius = np.linspace(-0.5, 0.5, n_samples, endpoint=False)
-        return (
-            np.stack(
-                [np.outer(np.cos(angles), radius), np.outer(np.sin(angles), radius)],
-                axis=-1,
-            )
-            .reshape(-1, 2)
-            .astype(np.float32)
-        )
+        return np.stack(
+            [np.outer(np.cos(angles), radius), np.outer(np.sin(angles), radius)],
+            axis=-1,
+        ).astype(np.float32)
 
     return build
 
 
 @pytest.fixture
 def operator(radial):
-    """An MRI-NUFFT operator on a radial trajectory."""
+    """An MRI-NUFFT operator, for computing the reference Gram the slow way.
+
+    Nothing in the package takes one of these any more; it is the yardstick.
+    """
     mrinufft = pytest.importorskip("mrinufft")
 
     def build(shape=(32, 32), n_spokes=48, n_samples=64, density=None):
         return mrinufft.get_operator("finufft")(
-            samples=radial(n_spokes, n_samples),
+            samples=radial(n_spokes, n_samples).reshape(-1, 2),
             shape=shape,
             density=density,
             n_coils=1,

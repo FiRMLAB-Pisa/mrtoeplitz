@@ -29,17 +29,15 @@ pip install mrtoeplitz[cuda]    # CUFINUFFT, for building on the GPU
 
 ## Use
 
-```python
-import mrinufft
-import torch
+Every builder takes a trajectory and an image shape. Nothing takes an MRI-NUFFT
+operator: a NUFFT is needed to *grid* the point spread function, and which one
+is the `backend` argument.
 
+```python
 import mrtoeplitz as mt
 
-operator = mrinufft.get_operator("finufft")(
-    samples=trajectory, shape=(256, 256), density=None, n_coils=1, squeeze_dims=False
-)
-
-kernel = mt.scalar_kernel(operator)
+# trajectory: (shots, points, axes), samples in [-0.5, 0.5), unscaled by the grid
+kernel = mt.scalar_kernel(trajectory, image_shape=(256, 256))
 normal = kernel.apply(image[None, None])  # (batch, rank, *image_shape)
 ```
 
@@ -47,6 +45,12 @@ normal = kernel.apply(image[None, None])  # (batch, rank, *image_shape)
 test suite checks it against `A_adjoint(A(x))` on real trajectories, on both
 devices, because a variant that merely *carries* the right support, packing and
 bound can still compute the wrong operator.
+
+Through coil sensitivities:
+
+```python
+normal = mt.apply_sense(kernel, image, maps)  # maps or a CoilKernels bank
+```
 
 ### Subspace
 

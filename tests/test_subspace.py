@@ -253,3 +253,17 @@ def test_a_cartesian_mask_count_that_is_neither_one_nor_the_frames_is_refused():
         ValueError, match=r"shared or have one mask per frame|no axis matching"
     ):
         mt.cartesian_subspace_kernel(masks, basis)
+
+
+def test_a_compressed_subspace_kernel_keeps_what_the_trajectory_reached(rotated):
+    """The subspace path reads the trajectory on the same scale as the scalar
+    one, so compression keeps a sensible share rather than a fortieth of it."""
+    trajectory, shape = rotated(n_frames=4, shape=(64, 64), n_spokes=64, n_samples=128)
+    basis = np.random.default_rng(8).normal(size=(2, 4)).astype(np.float32)
+
+    cut = mt.subspace_kernel(
+        trajectory, basis, shape, options=mt.toeplitz_options(compress=True)
+    )
+    whole = mt.subspace_kernel(trajectory, basis, shape, options=SINGLE)
+    kept = cut.n_locations / whole.n_locations
+    assert 0.5 < kept < 1.0

@@ -5,8 +5,6 @@ not, and which of those a caller has is measurable rather than a matter of
 faith. These tests say where the line falls.
 """
 
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 import torch
@@ -146,27 +144,16 @@ def test_tapering_the_field_of_view_edge_makes_truncation_viable(surface_maps):
 
 
 def test_a_sense_normal_reads_kernels_as_it_reads_a_dense_bank(
-    operator, image, band_limited, device
+    radial, image, band_limited, device
 ):
-    """The point of the whole thing: nothing in the apply changes.
-
-    Sensitivities reach the apply through a holder exposing ``shape`` and
-    ``smaps`` -- MRI-NUFFT's own operator validates that attribute as a NumPy
-    array, so a kernel bank is handed over beside it rather than through it.
-    """
+    """The point of the whole thing: nothing in the apply changes."""
     _, maps = band_limited(n_coils=4, image_side=32)
-    op = operator(shape=(32, 32))
     x = torch.as_tensor(image(shape=(32, 32)))[None, None].to(device)
-    kernel = mt.scalar_kernel(op, SINGLE).to(device)
+    kernel = mt.scalar_kernel(radial(), (32, 32), options=SINGLE).to(device)
 
-    def holding(sensitivities):
-        return SimpleNamespace(
-            shape=(32, 32), smaps=sensitivities, uses_sense=True, norm_factor=1.0
-        )
-
-    dense = mt.apply_sense(kernel, x, holding(maps.to(device)))
+    dense = mt.apply_sense(kernel, x, maps.to(device))
     compact = mt.apply_sense(
-        kernel, x, holding(mt.CoilKernels.from_maps(maps, (12, 12)).to(device))
+        kernel, x, mt.CoilKernels.from_maps(maps, (12, 12)).to(device)
     )
 
     error = torch.linalg.vector_norm(compact - dense) / torch.linalg.vector_norm(dense)

@@ -133,24 +133,19 @@ def test_a_cuda_transfer_is_built_without_importing_cupy():
     import mrtoeplitz as mt
 
     assert mt.register_torch_cufinufft()
-    mrinufft = pytest.importorskip("mrinufft")
+    pytest.importorskip("mrinufft")
 
     angles = np.linspace(0, np.pi, 16, endpoint=False)
     radius = np.linspace(-0.5, 0.5, 32, endpoint=False)
-    samples = (
-        np.stack(
-            [np.outer(np.cos(angles), radius), np.outer(np.sin(angles), radius)], -1
-        )
-        .reshape(-1, 2)
-        .astype(np.float32)
-    )
-    operator = mrinufft.get_operator("cufinufft-torch")(
-        samples=samples, shape=(32, 32), density=None, n_coils=1, squeeze_dims=False
-    )
-
+    samples = np.stack(
+        [np.outer(np.cos(angles), radius), np.outer(np.sin(angles), radius)], -1
+    ).astype(np.float32)
     sys.modules.pop("cupy", None)
     kernel = mt.scalar_kernel(
-        operator, mt.toeplitz_options(compress=False, cuda_transfer_precision="float32")
+        torch.as_tensor(samples, device="cuda"),
+        (32, 32),
+        backend="cufinufft-torch",
+        options=mt.toeplitz_options(compress=False, cuda_transfer_precision="float32"),
     )
     image = torch.randn(1, 1, 32, 32, dtype=torch.complex64, device="cuda")
     kernel.to("cuda").apply(image)

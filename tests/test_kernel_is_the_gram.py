@@ -28,11 +28,11 @@ SINGLE = mt.toeplitz_options(compress=False, cuda_transfer_precision="float32")
 
 
 def test_the_scalar_kernel_reproduces_the_exact_gram(
-    operator, image, exact_gram, relative_error, device
+    radial, operator, image, exact_gram, relative_error, device
 ):
     op = operator()
     x = image()
-    kernel = mt.scalar_kernel(op, SINGLE)
+    kernel = mt.scalar_kernel(radial(), (32, 32), options=SINGLE)
     assert relative_error(_apply(kernel, x, device), exact_gram(op, x)) < 1e-4
 
 
@@ -41,18 +41,18 @@ def test_a_density_weighted_kernel_reproduces_its_own_gram(
 ):
     # Density inside the normal is the intended acceleration (Pruessmann
     # CG-SENSE), not a defect: the adjoint applies it once, so the Gram does.
-    samples = radial()
-    density = np.abs(np.linalg.norm(samples, axis=-1)).astype(np.float32) + 1e-3
-    op = operator(density=density)
+    trajectory = radial()
+    density = (np.linalg.norm(trajectory, axis=-1) + 1e-3).astype(np.float32)
+    op = operator(density=density.reshape(-1))
     x = image()
-    kernel = mt.scalar_kernel(op, SINGLE)
+    kernel = mt.scalar_kernel(trajectory, (32, 32), density=density, options=SINGLE)
     assert relative_error(_apply(kernel, x, "cpu"), exact_gram(op, x)) < 1e-4
 
 
-def test_the_transfer_is_built_on_the_doubled_grid(operator):
+def test_the_transfer_is_built_on_the_doubled_grid(radial):
     """A point spread function on N covers displacements to +-N/2; the Gram
     needs +-(N - 1), so the transfer lives on 2N."""
-    kernel = mt.scalar_kernel(operator(shape=(32, 32)))
+    kernel = mt.scalar_kernel(radial(), (32, 32))
     assert kernel.spatial_shape == (64, 64)
     assert kernel.image_shape == (32, 32)
 
@@ -66,17 +66,13 @@ def test_a_fully_sampled_radial_disk_keeps_pi_over_four_of_the_grid(radial):
     a fixed number of cells on a disk whose radius is not fixed -- so it
     approaches pi/4 from above as the grid grows.
     """
-    mrinufft = pytest.importorskip("mrinufft")
     kept = {}
     for n in (64, 128):
-        operator = mrinufft.get_operator("finufft")(
-            samples=radial(n_spokes=round(math.pi / 2 * n), n_samples=2 * n),
-            shape=(n, n),
-            density=None,
-            n_coils=1,
-            squeeze_dims=False,
+        kernel = mt.scalar_kernel(
+            radial(n_spokes=round(math.pi / 2 * n), n_samples=2 * n),
+            (n, n),
+            options=mt.toeplitz_options(compress=True),
         )
-        kernel = mt.scalar_kernel(operator, mt.toeplitz_options(compress=True))
         kept[n] = kernel.n_locations / (2 * n) ** 2
 
     assert all(fraction > math.pi / 4 for fraction in kept.values())
@@ -87,7 +83,7 @@ def test_a_fully_sampled_radial_disk_keeps_pi_over_four_of_the_grid(radial):
 
 
 def test_compression_costs_accuracy_that_widening_the_rim_does_not_recover(
-    operator, image, exact_gram, relative_error
+    radial, operator, image, exact_gram, relative_error
 ):
     """What compression drops is not the interpolation rim.
 
@@ -96,27 +92,34 @@ def test_compression_costs_accuracy_that_widening_the_rim_does_not_recover(
     compressed kernel's error reaches a floor as the rim widens rather than
     returning to the uncompressed answer.
     """
+    trajectory = radial()
     op = operator()
     x = image()
     truth = exact_gram(op, x)
 
-    whole = mt.scalar_kernel(op, SINGLE)
-    cut = mt.scalar_kernel(op, mt.toeplitz_options(compress=True))
+    whole = mt.scalar_kernel(trajectory, (32, 32), options=SINGLE)
+    cut = mt.scalar_kernel(
+        trajectory, (32, 32), options=mt.toeplitz_options(compress=True)
+    )
 
     assert relative_error(_apply(whole, x, "cpu"), truth) < 1e-4
     assert relative_error(_apply(cut, x, "cpu"), truth) > 1e-4
     assert cut.n_locations < whole.n_locations
 
 
-def test_compression_records_what_it_left_out(operator):
-    cut = mt.scalar_kernel(operator(), mt.toeplitz_options(compress=True))
+def test_compression_records_what_it_left_out(radial):
+    cut = mt.scalar_kernel(
+        radial(), (32, 32), options=mt.toeplitz_options(compress=True)
+    )
     assert cut.truncation_bound > 0.0
-    whole = mt.scalar_kernel(operator(), mt.toeplitz_options(compress=False))
+    whole = mt.scalar_kernel(
+        radial(), (32, 32), options=mt.toeplitz_options(compress=False)
+    )
     assert whole.truncation_bound == 0.0
 
 
 def test_the_polyphase_layout_computes_the_same_operator(
-    operator, image, exact_gram, relative_error, device
+    radial, operator, image, exact_gram, relative_error, device
 ):
     """The layout check that must run on both devices.
 
@@ -127,8 +130,14 @@ def test_the_polyphase_layout_computes_the_same_operator(
     op = operator()
     x = image()
     truth = exact_gram(op, x)
-    padded = mt.scalar_kernel(op, mt.toeplitz_options(**{**SINGLE, "polyphase": False}))
-    parity = mt.scalar_kernel(op, mt.toeplitz_options(**{**SINGLE, "polyphase": True}))
+    padded = mt.scalar_kernel(
+        radial(),
+        (32, 32),
+        options=mt.toeplitz_options(**{**SINGLE, "polyphase": False}),
+    )
+    parity = mt.scalar_kernel(
+        radial(), (32, 32), options=mt.toeplitz_options(**{**SINGLE, "polyphase": True})
+    )
 
     assert isinstance(parity, mt.PolyphaseToeplitzKernel)
     assert relative_error(_apply(padded, x, device), truth) < 1e-4
@@ -136,9 +145,9 @@ def test_the_polyphase_layout_computes_the_same_operator(
     assert relative_error(_apply(parity, x, device), _apply(padded, x, device)) < 1e-5
 
 
-def test_a_polyphase_kernel_files_one_component_per_parity(operator):
+def test_a_polyphase_kernel_files_one_component_per_parity(radial):
     parity = mt.scalar_kernel(
-        operator(), mt.toeplitz_options(compress=False, polyphase=True)
+        radial(), (32, 32), options=mt.toeplitz_options(compress=False, polyphase=True)
     )
     # Two dimensions, so four parities, each on the image grid rather than
     # the doubled one: that is what keeps the doubled grid unmaterialised.
@@ -149,7 +158,7 @@ def test_a_polyphase_kernel_files_one_component_per_parity(operator):
 
 @pytest.mark.cuda
 def test_the_cuda_transfer_defaults_to_bfloat16_on_a_capable_device(
-    operator, image, exact_gram, relative_error
+    radial, operator, image, exact_gram, relative_error
 ):
     """The default costs two decimal digits, and is worth knowing about.
 
@@ -167,8 +176,10 @@ def test_the_cuda_transfer_defaults_to_bfloat16_on_a_capable_device(
     x = image()
     truth = exact_gram(op, x)
 
-    default = mt.scalar_kernel(op, mt.toeplitz_options(compress=False))
-    single = mt.scalar_kernel(op, SINGLE)
+    default = mt.scalar_kernel(
+        radial(), (32, 32), options=mt.toeplitz_options(compress=False)
+    )
+    single = mt.scalar_kernel(radial(), (32, 32), options=SINGLE)
 
     coarse = relative_error(_apply(default, x, "cuda"), truth)
     fine = relative_error(_apply(single, x, "cuda"), truth)
@@ -176,3 +187,24 @@ def test_the_cuda_transfer_defaults_to_bfloat16_on_a_capable_device(
     assert fine < 1e-4
     assert 1e-4 < coarse < 1e-2
     assert default.last_cuda_mode is not None
+
+
+def test_samples_are_read_on_the_half_open_minus_half_to_half_scale():
+    """The convention every entry point of this package takes.
+
+    ``occupancy_indices`` is public and reads a trajectory onto the transfer
+    grid. Reading it on MRI-NUFFT's internal ``[-pi, pi)`` scale instead would
+    shrink the support by ``(2 pi)`` per axis, and a compressed kernel would
+    silently keep a fortieth of what it should while still passing every
+    uncompressed accuracy check.
+    """
+    grid = (32, 32)
+    edge = np.linspace(-0.5, 0.5, 64, endpoint=False, dtype=np.float32)
+    whole = np.stack(np.meshgrid(edge, edge, indexing="ij"), axis=-1).reshape(-1, 2)
+    assert mt.occupancy_indices(whole, grid, width=0).numel() == 32 * 32
+
+    quarter = np.stack(np.meshgrid(edge / 2, edge / 2, indexing="ij"), axis=-1).reshape(
+        -1, 2
+    )
+    kept = mt.occupancy_indices(quarter, grid, width=0).numel() / (32 * 32)
+    assert 0.2 < kept < 0.3

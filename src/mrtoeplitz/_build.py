@@ -31,7 +31,7 @@ from importlib import import_module
 from math import isqrt, prod
 from typing import Any
 
-from ._backend import _base_fourier_operator, _mrinufft_norm_factor, _require_mrinufft
+from ._backend import _mrinufft_norm_factor, _require_mrinufft
 from ._kernel import (
     CompactToeplitzKernel,
     PolyphaseToeplitzKernel,
@@ -51,6 +51,36 @@ _PSF_TOLERANCE = 1e-4
 _NARROW_PSF_TOLERANCE = 1e-3
 
 _NARROW_PSF_UPSAMPLING = 1.25
+
+
+def _flat_samples(trajectory: Any, image_ndim: int) -> Any:
+    """Read one trajectory as a flat ``(samples, axes)`` bank."""
+    trajectory = as_torch(trajectory)
+    if trajectory.shape[-1] != image_ndim:
+        raise ValueError(
+            f"trajectory's last axis is the {trajectory.shape[-1]} spatial "
+            f"axes it names, which must match the {image_ndim}-dimensional "
+            f"image grid"
+        )
+    if trajectory.ndim not in {2, 3}:
+        raise ValueError(
+            f"trajectory must be (points, axes) or (shots, points, axes), got "
+            f"shape {tuple(trajectory.shape)}; a trajectory with a frames axis "
+            f"belongs to subspace_kernel"
+        )
+    return trajectory.reshape(-1, image_ndim)
+
+
+def _flat_density(density: Any | None, n_samples: int) -> Any | None:
+    """Read a density as one weight per sample, or nothing."""
+    if density is None:
+        return None
+    weights = as_torch(density).reshape(-1)
+    if weights.numel() != n_samples:
+        raise ValueError(
+            f"density has {weights.numel()} weights for {n_samples} samples"
+        )
+    return weights
 
 
 def _psf_operator(
@@ -167,10 +197,11 @@ def _psf_plans() -> Any:
 
 
 def _compute_toeplitz_transfer(
-    native_operator: Any,
+    samples: Any,
+    image_shape: tuple[int, ...],
     weights: Any | None = None,
     *,
-    complex_weights: bool = False,
+    backend: str = "finufft",
 ) -> Any:
     """Return the transfer a Toeplitz normal operator multiplies by.
 
@@ -186,26 +217,16 @@ def _compute_toeplitz_transfer(
     operator the forward NUFFT applies, so the normal is the Gram of the
     transform actually being inverted.
     """
-    del complex_weights
     torch = import_module("torch")
-    base = _base_fourier_operator(native_operator)
-    image_shape = tuple(int(size) for size in base.shape)
+    samples = as_torch(samples)
     spatial_shape = tuple(2 * size for size in image_shape)
-    operator = _psf_operator(
-        base.samples,
-        getattr(base, "backend", "finufft"),
-        spatial_shape,
-    )
+    operator = _psf_operator(samples, backend, spatial_shape)
 
-    if weights is None:
-        # The plain normal is weighted by whatever the operator itself carries:
-        # its adjoint applies the density once, so the Gram does too.
-        weights = getattr(base, "density", None)
     if weights is None:
         values = torch.ones(
             operator.n_samples,
             dtype=torch.complex64,
-            device=as_torch(base.samples).device,
+            device=samples.device,
         )
     else:
         values = as_torch(weights).reshape(-1).to(torch.complex64)
@@ -217,7 +238,7 @@ def _compute_toeplitz_transfer(
     # ``adj_op`` answers a centred image and divides by the doubled grid's own
     # normalization, while the normal operator this stands in for carries the
     # image grid's twice -- once in the forward and once in the adjoint.
-    scale = float(operator.norm_factor) / float(base.norm_factor) ** 2
+    scale = float(operator.norm_factor) / _mrinufft_norm_factor(image_shape) ** 2
     return torch.fft.fftn(torch.fft.ifftshift(psf, dim=axes), dim=axes) * scale
 
 
@@ -337,7 +358,11 @@ def _selected_transfer(
 
 @_within_psf_plans
 def scalar_kernel(
-    native_operator: Any,
+    trajectory: Any,
+    image_shape: tuple[int, ...],
+    *,
+    density: Any | None = None,
+    backend: str = "finufft",
     options: dict[str, Any] | None = None,
     streaming: Any | None = None,
 ) -> CompactToeplitzKernel:
@@ -345,10 +370,19 @@ def scalar_kernel(
 
     Parameters
     ----------
-    native_operator
-        A NUFFT exposing ``shape``, ``samples``, ``norm_factor`` and
-        optionally ``density``. Its density, when it carries one, weights the
-        transfer: the adjoint applies it once, so the Gram does too.
+    trajectory
+        ``(shots, points, axes)``, or ``(points, axes)`` for a single shot.
+        ``axes`` is the image's dimensionality, and the samples are in the
+        ``[-0.5, 0.5)`` units MRI-NUFFT expects -- unscaled by the grid.
+    image_shape
+        The image grid. The transfer is built on twice this in every dimension.
+    density
+        Sample weights, broadcastable to the trajectory without its axes.
+        ``None`` weights every sample equally. Density inside the normal is
+        the intended acceleration, not a defect: an adjoint applies it once,
+        so the Gram does too.
+    backend
+        MRI-NUFFT backend used to grid the point spread function.
     options
         As :func:`toeplitz_options`.
     streaming
@@ -357,22 +391,47 @@ def scalar_kernel(
     Returns
     -------
     CompactToeplitzKernel
-        The normal operator, on the doubled grid.
+        The normal operator, taking ``(batch, 1, *image_shape)``.
+
+    Raises
+    ------
+    ValueError
+        If the trajectory's rank is not two or three, its last axis does not
+        match the image's dimensionality, or the density does not fit the
+        samples.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import mrtoeplitz as mt
+    >>> angles = np.linspace(0, np.pi, 16, endpoint=False)
+    >>> radius = np.linspace(-0.5, 0.5, 32, endpoint=False)
+    >>> spokes = np.stack(
+    ...     [np.outer(np.cos(angles), radius), np.outer(np.sin(angles), radius)],
+    ...     axis=-1,
+    ... ).astype(np.float32)
+    >>> kernel = mt.scalar_kernel(spokes, (32, 32))
+    >>> kernel.rank, kernel.image_shape, kernel.spatial_shape
+    (1, (32, 32), (64, 64))
     """
     options = _toeplitz_options() if options is None else options
-    base = _base_fourier_operator(native_operator)
-    image_shape = tuple(int(size) for size in base.shape)
+    image_shape = tuple(int(size) for size in image_shape)
+    samples = _flat_samples(trajectory, len(image_shape))
+    weights = _flat_density(density, samples.shape[0])
     spatial_shape = tuple(2 * size for size in image_shape)
-    transfer = as_torch(_compute_toeplitz_transfer(base)).flatten()
+
+    transfer = as_torch(
+        _compute_toeplitz_transfer(samples, image_shape, weights, backend=backend)
+    ).flatten()
     indices = _support_locations(
-        getattr(base, "samples", None),
+        samples,
         spatial_shape,
         "cpu" if streaming is not None else transfer.device,
         options["compress"],
     )
     left_out = _complement_of(indices, transfer.numel(), transfer.device)
     values = _selected_transfer(transfer, indices, streaming=streaming).real[None]
-    kernel = _make_kernel(
+    return _make_kernel(
         values,
         indices,
         spatial_shape,
@@ -381,7 +440,6 @@ def scalar_kernel(
         options=options,
         truncation_bound=_largest_left_out(transfer.real, left_out),
     )
-    return kernel
 
 
 def _centring_signs(indices: Any, spatial_shape: tuple[int, ...]) -> Any:

@@ -30,8 +30,3 @@ def _require_mrinufft() -> Any:
 def _mrinufft_norm_factor(shape: tuple[int, ...]) -> float:
     """Return the normalization an mri-nufft operator on ``shape`` divides by."""
     return sqrt(prod(shape) * 2 ** len(shape))
-
-
-def _base_fourier_operator(native_operator: Any) -> Any:
-    """Return the undecorated Fourier operator beneath mri-nufft wrappers."""
-    return getattr(native_operator, "_fourier_op", native_operator)
