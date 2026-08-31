@@ -26,3 +26,7 @@ htmlcov/
 
 # Benchmark inputs are fetched, never committed.
 data/
+
+# scikit-build-core's build tree
+build/
+_skbuild/

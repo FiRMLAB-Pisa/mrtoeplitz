@@ -5,9 +5,10 @@
 
 #include <pybind11/pybind11.h>
 
-namespace py = pybind11;
+#include "bindings.hpp"
 
 PYBIND11_MODULE(_ext, module)
 {
-    module.doc() = "Precompiled kernels for mrtoeplitz";
+    module.doc() = "Precompiled CPU kernels for mrtoeplitz";
+    mrtoeplitz_bind_packed_matvec(module);
 }

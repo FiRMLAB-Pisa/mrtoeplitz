@@ -22,10 +22,28 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 
-dependencies = ["numpy>=1.24", "torch>=2.4", "mrutils"]
+# Torch alone. The kernel's transforms are raw, uncentred torch.fft calls
+# taken norm="forward" into a reused buffer, which is what makes the resident
+# lane fit; the centred orthonormal convention other packages share is the
+# wrong tool here. Nothing else is needed to *apply* a kernel -- building one
+# needs a NUFFT, which is the "nufft" extra.
+dependencies = [
+  "numpy>=1.24",
+  "torch>=2.4",
+  # Two heuristics read the host's free memory: whether a CPU multiply can run
+  # dense, and whether the transfer can be pinned. Both fall back safely
+  # without it, and the only symptom of the fallback is unexplained runtime,
+  # which is not a thing to leave to an optional install.
+  "psutil>=5.9",
+]
 
 [project.optional-dependencies]
+# Building a transfer grids a point spread function, which is a NUFFT.
+# Applying an already-built kernel needs none of this.
+nufft = ["mri-nufft[finufft]>=1.0"]
+cuda = ["cufinufft>=2.5.1; platform_system == 'Linux'"]
 dev = [
+  "mrtoeplitz[nufft]",
   "pytest>=8",
   "pytest-cov>=5",
   "coverage>=7",
@@ -98,6 +116,9 @@ ignore = [
   "COM812", # trailing comma conflicts with the formatter
   "D105",   # magic methods carry their meaning in their name
   "D107",   # __init__ is documented on the class
+  # Internal consistency checks in the numeric kernels, not input validation:
+  # what they assert is a fact about the code, so a caller cannot trip one.
+  "S101",
 ]
 
 [tool.ruff.lint.per-file-ignores]

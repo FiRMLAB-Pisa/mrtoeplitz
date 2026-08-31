@@ -11,15 +11,34 @@ scripts/sync_agent_docs.sh, which pre-commit runs. Edit this file, never those.
 
 Memory-efficient Toeplitz normal operators for MRI reconstruction: scalar and subspace, on CPU and CUDA.
 
-It is one of a family of small, single-purpose MRI packages. The layering is
-strict: `mrutils` is the base; `torchsolve`, `mrtoeplitz`, `mrllr`, `mrmotion`
-and `mrdistortion` sit on it and never import each other; `deepmr` sits on all
-of them. If you find yourself wanting a sibling's code, the answer is either to
-move it down into `mrutils` or to move the caller up into `deepmr`.
+It is one of a family of small, single-purpose MRI packages, and it sits low
+in it: **mrtoeplitz depends on Torch alone**, with MRI-NUFFT needed only to
+*build* a transfer and declared as an extra. It imports no sibling package,
+and `tests/test_dependencies.py` fails if one appears.
 
-**deepinv is a `deepmr`-only dependency.** Everything below it is plain Torch
-with duck-typed operators (`A`, `A_adjoint`, `shape`). Do not import deepinv
-here unless this package is `deepmr`.
+That is not bookkeeping. The nearest sibling, `mrutils`, offers the centred
+orthonormal Fourier convention; every transform here is deliberately a raw,
+uncentred one taken `norm="forward"` into a reused buffer, and the transfer is
+stored pre-divided by `prod(spatial_shape)`. That form is what lets the
+resident lane fit and what removed a full extra pass per transform. Routing
+these through centred helpers would quietly undo it.
+
+Physics belongs above this package. A builder takes a duck-typed NUFFT
+(`shape`, `samples`, `norm_factor`, optionally `density` and `backend`) or, for
+a subspace kernel, a list of `(samples, weights, coefficients)` blocks. Grouping
+frames onto the trajectories they share is the caller's job, because only the
+caller knows which frames share a plan. Never take a physics object here.
+
+**deepinv is a `deepmr`-only dependency.** Do not import it here.
+
+## The one claim worth making
+
+`kernel.apply(x)` is `A^H A x`. The only evidence that counts for any variant
+is `fast(x)` against `A_adjoint(A(x))` on a real trajectory -- a variant that
+merely *carries* the right support, packing and bound can still compute the
+wrong operator. Any kernel-layout check runs on CPU **and** CUDA: sharing
+scratch between polyphase components once passed on CPU while CUDA was 100%
+wrong.
 
 ## Build and test
 
