@@ -45,7 +45,10 @@ nufft = ["finufft>=2.5"]
 # tensors directly and no second CUDA array library is involved.
 cuda = ["cufinufft>=2.5.1; platform_system == 'Linux'"]
 dev = [
-  "mrtoeplitz[nufft,cuda]",
+  # Not the cuda extra: its wheel installs on a machine with no GPU and
+  # then fails to load its own library, which is not a useful thing for a
+  # CPU runner to discover.
+  "mrtoeplitz[nufft]",
   "pytest>=8",
   "pytest-cov>=5",
   "coverage>=7",

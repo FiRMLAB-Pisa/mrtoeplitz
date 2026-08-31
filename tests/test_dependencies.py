@@ -122,9 +122,15 @@ def test_a_cuda_transfer_is_built_without_importing_cupy():
     import sys
 
     torch = pytest.importorskip("torch")
-    pytest.importorskip("cufinufft")
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device")
+    try:
+        import cufinufft  # noqa: F401
+    except ImportError as error:
+        # The wheel installs anywhere; its library only loads where there is a
+        # CUDA runtime, and that failure is an ImportError from deep inside it
+        # rather than a missing module.
+        pytest.skip(f"cufinufft unavailable: {error}")
 
     import numpy as np
 
