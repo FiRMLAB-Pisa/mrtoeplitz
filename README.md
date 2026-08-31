@@ -105,14 +105,26 @@ kernel = mt.cartesian_subspace_kernel(masks, basis)
 normal = mt.apply_sense(kernel, image, maps)
 ```
 
-For arrays too large to hold as maps, pass the calibration's k-space kernels
-instead. They stand in for the dense bank — shape, rank and coil slicing all
-answer as the tensor would — and only the coils asked for are expanded.
+For arrays too large to hold as maps, pass k-space kernels instead. They stand
+in for the dense bank — shape, rank and coil slicing all answer as the tensor
+would — and only the coils asked for are expanded.
 
 ```python
-kernels = mt.CoilKernels(calibration_kernels, image_shape=(320, 320, 320))
+kernels = mt.CoilKernels.from_maps(maps, kernel_shape=(16, 16, 16))
 normal = mt.apply_sense(kernel, image, kernels)
 ```
+
+Sound exactly when the maps are band-limited, which is a measurement rather
+than an assumption. Against three banks from BART, at a 16-cell kernel:
+
+| maps | `truncation_error` |
+|---|---|
+| `bart nlinv` — Sobolev weighting *is* a band limit | **1.6e-07** |
+| `bart ecalib` — the `\|m\| = 1` normalisation puts an edge in the image | 1.1e-01 |
+| `bart coils` — a simulated array's field decays as a power law | 1.6e-01 |
+
+So this pairs with NLINV, whose maps BART already stores as k-space
+coefficients. For ESPIRiT, keep the calibration kernels and never form the map.
 
 ![sensitivities as k-space kernels](examples/figures/coil_kernels.png)
 
