@@ -93,17 +93,32 @@ def main() -> None:
     seconds["adjoint"] = clock() - start
     del backprojection
 
+    # Where the transfer is gridded follows where the trajectory is: a host
+    # trajectory builds with FINUFFT, a device one with CUFINUFFT. Handing it
+    # a NumPy array and moving the kernel afterwards would time a host build
+    # and a copy.
+    trajectory = acquisition.trajectory
+    density = acquisition.density
+    if arguments.device == "cuda":
+        trajectory = torch.as_tensor(trajectory).cuda()
+        density = torch.as_tensor(density).cuda()
+
     start = clock()
     kernel = mt.subspace_kernel(
-        acquisition.trajectory,
+        trajectory,
         acquisition.basis,
         shape,
-        density=acquisition.density,
+        density=density,
     )
-    if arguments.device == "cuda":
-        kernel = kernel.to("cuda")
     seconds["create"] = clock() - start
     extra = {"transfer_bytes": float(kernel.storage_nbytes)}
+
+    # Building on the device leaves the gridding plan's blocks in the caching
+    # allocator. They are free, but Torch will not give them back to the
+    # driver on its own, and at this size the apply needs them: without this
+    # it runs several times slower purely for want of room.
+    if arguments.device == "cuda":
+        torch.cuda.empty_cache()
 
     # The real multicoil normal: one coefficient volume in and out, with the
     # sensitivities applied and summed over inside. Coils are taken one at a

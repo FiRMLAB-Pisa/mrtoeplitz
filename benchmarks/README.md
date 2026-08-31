@@ -55,12 +55,26 @@ rank 4, 256³, in low-memory mode. RTX 4060 Laptop, 8 GiB.
 
 | | RAM | VRAM | `A^H y` | create | apply |
 |---|---|---|---|---|---|
-| floor | 643 MiB | 3185 MiB | — | — | 2149 ms |
-| mrtoeplitz | 12828 MiB | 7759 MiB | 13277 ms | 88831 ms | **5143 ms** |
+| floor | 643 MiB | 3185 MiB | — | — | 2103–2149 ms |
+| mrtoeplitz | 10733–12828 MiB | 7759–7879 MiB | 12090–13277 ms | 16786–88831 ms | **5143–27949 ms** |
 
-**The apply runs at 2.39x the floor.** The transfer is built once and applied
-every iteration, so the 89 s build is amortised over a solve; what a solve
-feels is the 5.1 s.
+**The apply is not reproducible at this size and no ratio to the floor is
+quoted from it.** Three runs of the same work gave 5143, 17992 and 27949 ms
+while device memory crept from 7759 to 7879 MiB of an 8188 MiB card. The
+operator is at the edge of the card, so what varies is how much room the apply
+finds, not what it computes. Building the transfer on the device rather than
+on the host and moving it makes creation 4.6x faster (88.8 s to 19.5 s) and is
+the right way to build it; it does not account for the spread in the apply,
+and neither does releasing the allocator between the two, which was tried and
+made no difference.
+
+At 128³, where there is room, the same comparison is stable and the two ways
+of building are indistinguishable in the apply: 428 ms host-built against
+407 ms device-built, identical storage, dtype and lane.
+
+A trustworthy number at 256³ needs either a card this configuration fits
+inside with room to spare, or less pressure on this one -- fewer coils
+resident, or sensitivities held as kernels rather than as maps.
 
 ### CPU
 
@@ -69,11 +83,7 @@ feels is the 5.1 s.
 | floor | 3578 MiB | — | — | — | 21020 ms |
 | mrtoeplitz | 15462 MiB | — | 42668 ms | 83986 ms | **61506 ms** |
 
-**2.93x the floor.**
-
-Device memory is the number to watch: 7759 MiB of an 8188 MiB card, against a
-floor that already needs 3185 MiB for the transforms alone. The operator fits,
-and it fits with little to spare.
+**2.93x the floor**, and stable: nothing here is near a limit.
 
 ## Running it
 
@@ -98,17 +108,13 @@ MRISubspaceRecon's CUDA extension does not compile for a complex basis
 undefined names). Reporting numbers from a lane that was still being debugged
 would be worse than reporting none.
 
-One measurement from that work does stand, because file sizes do not depend on
-contention. At 64³ with rank 4, where a dense transfer is 268,435,456 bytes:
-
-| | transfer |
-|---|---|
-| BART, default | 268,435,456 B |
-| BART, `upper-triag-psf` | 167,772,160 B |
-| BART, `compress-psf` | **38,515,712 B** |
-| mrtoeplitz, low-memory default | 63,132,608 B |
-
-BART's `upper-triag-psf` figure is exactly `128³ x 10 x 8`, so it packs the
-same `rank (rank + 1) / 2` pairs. Its compression keeps less than ours does on
-this trajectory -- 36.7 MiB against 60.2 MiB -- which is worth understanding
-before claiming anything about relative footprint.
+One measurement from that work looked comparable and is not. At 64³ BART's
+`compress-psf` keeps 38,515,712 bytes where our low-memory default keeps
+63,132,608, but the two are compressing different regions: a sample at 0.5
+lands on the last cell of the transfer grid here and on the middle one in the
+BART staging, so ours retains the ball the trajectory fills -- 53.7% of the
+grid, against the 52.4% a sphere occupies in its cube -- and BART's retains a
+ball of half that radius. Ours is right for its own convention and cannot be
+tightened: a koosh-ball genuinely reaches half the doubled grid. What BART's
+number means depends on how it maps `-t` units onto its internal grid, which
+is not established here, so no conclusion is drawn from the pair.
