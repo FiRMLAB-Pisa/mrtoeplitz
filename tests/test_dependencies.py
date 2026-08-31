@@ -28,7 +28,7 @@ FORBIDDEN = {
 }
 
 #: Distribution names whose import name differs.
-IMPORT_NAMES = {"mri-nufft": "mrinufft"}
+IMPORT_NAMES: dict[str, str] = {}
 
 #: Imported without being declared, because Torch brings them itself and
 #: pinning a version here would fight it.
@@ -115,11 +115,9 @@ def test_every_imported_module_is_declared_in_the_metadata():
 def test_a_cuda_transfer_is_built_without_importing_cupy():
     """The CUDA path uses Torch tensors, not a second CUDA array library.
 
-    ``cufinufft`` itself needs only NumPy -- it takes anything exposing
-    ``__cuda_array_interface__``. MRI-NUFFT's stock ``cufinufft`` interface
-    allocates through CuPy and refuses to run without it; the ``cufinufft-torch``
-    backend registered here subclasses it and replaces those allocations, so a
-    build never reaches CuPy even where CuPy happens to be installed.
+    CUFINUFFT reads anything exposing ``__cuda_array_interface__``, so a Torch
+    tensor goes straight in. Its own requirements are NumPy and packaging;
+    CuPy is a choice some wrappers make and this package does not.
     """
     import sys
 
@@ -132,19 +130,16 @@ def test_a_cuda_transfer_is_built_without_importing_cupy():
 
     import mrtoeplitz as mt
 
-    assert mt.register_torch_cufinufft()
-    pytest.importorskip("mrinufft")
-
     angles = np.linspace(0, np.pi, 16, endpoint=False)
     radius = np.linspace(-0.5, 0.5, 32, endpoint=False)
     samples = np.stack(
         [np.outer(np.cos(angles), radius), np.outer(np.sin(angles), radius)], -1
     ).astype(np.float32)
+
     sys.modules.pop("cupy", None)
     kernel = mt.scalar_kernel(
         torch.as_tensor(samples, device="cuda"),
         (32, 32),
-        backend="cufinufft-torch",
         options=mt.toeplitz_options(compress=False, cuda_transfer_precision="float32"),
     )
     image = torch.randn(1, 1, 32, 32, dtype=torch.complex64, device="cuda")

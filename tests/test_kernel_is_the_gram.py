@@ -28,25 +28,26 @@ SINGLE = mt.toeplitz_options(compress=False, cuda_transfer_precision="float32")
 
 
 def test_the_scalar_kernel_reproduces_the_exact_gram(
-    radial, operator, image, exact_gram, relative_error, device
+    radial, image, exact_gram, relative_error, device
 ):
-    op = operator()
+    trajectory = radial()
     x = image()
-    kernel = mt.scalar_kernel(radial(), (32, 32), options=SINGLE)
-    assert relative_error(_apply(kernel, x, device), exact_gram(op, x)) < 1e-4
+    kernel = mt.scalar_kernel(trajectory, (32, 32), options=SINGLE)
+    truth = exact_gram(trajectory, (32, 32), x)
+    assert relative_error(_apply(kernel, x, device), truth) < 1e-4
 
 
 def test_a_density_weighted_kernel_reproduces_its_own_gram(
-    operator, radial, image, exact_gram, relative_error
+    radial, image, exact_gram, relative_error
 ):
     # Density inside the normal is the intended acceleration (Pruessmann
     # CG-SENSE), not a defect: the adjoint applies it once, so the Gram does.
     trajectory = radial()
     density = (np.linalg.norm(trajectory, axis=-1) + 1e-3).astype(np.float32)
-    op = operator(density=density.reshape(-1))
     x = image()
     kernel = mt.scalar_kernel(trajectory, (32, 32), density=density, options=SINGLE)
-    assert relative_error(_apply(kernel, x, "cpu"), exact_gram(op, x)) < 1e-4
+    truth = exact_gram(trajectory, (32, 32), x, density=density)
+    assert relative_error(_apply(kernel, x, "cpu"), truth) < 1e-4
 
 
 def test_the_transfer_is_built_on_the_doubled_grid(radial):
@@ -83,7 +84,7 @@ def test_a_fully_sampled_radial_disk_keeps_pi_over_four_of_the_grid(radial):
 
 
 def test_compression_costs_accuracy_that_widening_the_rim_does_not_recover(
-    radial, operator, image, exact_gram, relative_error
+    radial, image, exact_gram, relative_error
 ):
     """What compression drops is not the interpolation rim.
 
@@ -93,9 +94,8 @@ def test_compression_costs_accuracy_that_widening_the_rim_does_not_recover(
     returning to the uncompressed answer.
     """
     trajectory = radial()
-    op = operator()
     x = image()
-    truth = exact_gram(op, x)
+    truth = exact_gram(trajectory, (32, 32), x)
 
     whole = mt.scalar_kernel(trajectory, (32, 32), options=SINGLE)
     cut = mt.scalar_kernel(
@@ -119,7 +119,7 @@ def test_compression_records_what_it_left_out(radial):
 
 
 def test_the_polyphase_layout_computes_the_same_operator(
-    radial, operator, image, exact_gram, relative_error, device
+    radial, image, exact_gram, relative_error, device
 ):
     """The layout check that must run on both devices.
 
@@ -127,9 +127,8 @@ def test_the_polyphase_layout_computes_the_same_operator(
     the components' own transfers by mistake gives an operator that is 1.47
     relative error wrong on CUDA and right on CPU.
     """
-    op = operator()
     x = image()
-    truth = exact_gram(op, x)
+    truth = exact_gram(radial(), (32, 32), x)
     padded = mt.scalar_kernel(
         radial(),
         (32, 32),
@@ -158,7 +157,7 @@ def test_a_polyphase_kernel_files_one_component_per_parity(radial):
 
 @pytest.mark.cuda
 def test_the_cuda_transfer_defaults_to_bfloat16_on_a_capable_device(
-    radial, operator, image, exact_gram, relative_error
+    radial, image, exact_gram, relative_error
 ):
     """The default costs two decimal digits, and is worth knowing about.
 
@@ -172,9 +171,8 @@ def test_the_cuda_transfer_defaults_to_bfloat16_on_a_capable_device(
     if torch.cuda.get_device_capability()[0] < 8:
         pytest.skip("no native bfloat16")
 
-    op = operator()
     x = image()
-    truth = exact_gram(op, x)
+    truth = exact_gram(radial(), (32, 32), x)
 
     default = mt.scalar_kernel(
         radial(), (32, 32), options=mt.toeplitz_options(compress=False)

@@ -23,9 +23,17 @@ reallocated.
 
 ```bash
 pip install mrtoeplitz          # applying a kernel: Torch only
-pip install mrtoeplitz[nufft]   # building one: grids a PSF, so needs a NUFFT
-pip install mrtoeplitz[cuda]    # CUFINUFFT, for building on the GPU
+pip install mrtoeplitz[nufft]   # building one on the host: FINUFFT
+pip install mrtoeplitz[cuda]    # building one on a device: CUFINUFFT
 ```
+
+Building a transfer needs exactly one thing of a NUFFT — a type-1 transform,
+nonuniform samples onto a uniform grid — so it calls FINUFFT and CUFINUFFT
+directly rather than through a wrapper. CUFINUFFT reads anything exposing
+`__cuda_array_interface__`, so Torch tensors go straight in and no second CUDA
+array library is involved. Which library runs follows the trajectory: a
+trajectory on the host builds a host transfer, one on a device builds it
+there, and the kernel moves afterwards with `.to()`.
 
 ## Use
 
@@ -47,7 +55,11 @@ Trajectories are in **normalized k-space**: a sample at `-0.5` is grid location
 `-kN/2` of an oversampled grid of size `kN`, and one at `+0.5` is `+kN/2`. So
 placing a sample on a grid is a multiply by that grid's size, and the same
 numbers describe the image grid and the doubled grid the transfer lives on
-without rescaling. Nothing here works in radians.
+without rescaling. The conversion to the radians FINUFFT works in happens once,
+where the plan is set.
+
+The operator is normalized by the size of that doubled grid: `AᴴA` with the
+forward and adjoint transforms each divided by `sqrt(prod(2N))`.
 
 `kernel(image)` is `AᴴA`, and that is the only claim worth making about it: the
 test suite checks it against `A_adjoint(A(x))` on real trajectories, on both

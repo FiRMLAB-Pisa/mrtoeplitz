@@ -28,44 +28,20 @@ def rotated(radial):
     return build
 
 
-@pytest.fixture
-def operators_for():
-    """One MRI-NUFFT operator per frame, for the reference Gram."""
-    mrinufft = pytest.importorskip("mrinufft")
-
-    def build(trajectory, shape):
-        return [
-            mrinufft.get_operator("finufft")(
-                samples=frame.reshape(-1, trajectory.shape[-1]),
-                shape=shape,
-                density=None,
-                n_coils=1,
-                squeeze_dims=False,
-            )
-            for frame in trajectory
-        ]
-
-    return build
-
-
-def _exact_subspace_gram(operators, basis, x):
+def _exact_subspace_gram(exact_gram, trajectory, shape, basis, x):
     """``sum_t conj(U[j,t]) A_t^H A_t (sum_i U[i,t] x_i)``, the slow way."""
     rank, n_frames = basis.shape
-    shape = x.shape[1:]
     out = np.zeros_like(x)
     for frame in range(n_frames):
         image = sum(basis[i, frame] * x[i] for i in range(rank))
-        operator = operators[frame]
-        back = np.asarray(
-            operator.adj_op(operator.op(image.reshape(1, 1, *shape)))
-        ).reshape(shape)
+        back = exact_gram(trajectory[frame], shape, image)
         for j in range(rank):
             out[j] += np.conj(basis[j, frame]) * back
     return out
 
 
 def test_the_subspace_kernel_reproduces_the_exact_subspace_gram(
-    rotated, operators_for, device
+    rotated, exact_gram, device
 ):
     trajectory, shape = rotated(n_frames=4)
     rng = np.random.default_rng(1)
@@ -79,11 +55,11 @@ def test_the_subspace_kernel_reproduces_the_exact_subspace_gram(
         kernel.to(device)(torch.as_tensor(x)[None].to(device)).detach().cpu()
     ).reshape(x.shape)
 
-    truth = _exact_subspace_gram(operators_for(trajectory, shape), basis, x)
+    truth = _exact_subspace_gram(exact_gram, trajectory, shape, basis, x)
     assert np.linalg.norm(fast - truth) / np.linalg.norm(truth) < 1e-3
 
 
-def test_a_shared_trajectory_reproduces_the_exact_subspace_gram(rotated, operators_for):
+def test_a_shared_trajectory_reproduces_the_exact_subspace_gram(rotated, exact_gram):
     """One trajectory every frame was acquired on, stated by its rank."""
     trajectory, shape = rotated(n_frames=1)
     shared = trajectory[0]
@@ -97,7 +73,7 @@ def test_a_shared_trajectory_reproduces_the_exact_subspace_gram(rotated, operato
     fast = np.asarray(kernel(torch.as_tensor(x)[None]).detach().cpu()).reshape(x.shape)
 
     repeated = np.stack([shared] * 5)
-    truth = _exact_subspace_gram(operators_for(repeated, shape), basis, x)
+    truth = _exact_subspace_gram(exact_gram, repeated, shape, basis, x)
     assert np.linalg.norm(fast - truth) / np.linalg.norm(truth) < 1e-3
 
 
@@ -141,7 +117,7 @@ def test_frames_sharing_a_trajectory_are_gridded_once(rotated, monkeypatch):
     assert seen["samples"] == 4 * 16 * 48
 
 
-def test_grouping_does_not_change_the_operator(rotated, operators_for):
+def test_grouping_does_not_change_the_operator(rotated, exact_gram):
     """Ten frames on one rotation must answer as ten separate frames would."""
     trajectory, shape = rotated(n_frames=2)
     cycled = np.stack([trajectory[index % 2] for index in range(6)])
@@ -153,7 +129,7 @@ def test_grouping_does_not_change_the_operator(rotated, operators_for):
 
     kernel = mt.subspace_kernel(cycled, basis, shape, options=SINGLE)
     fast = np.asarray(kernel(torch.as_tensor(x)[None]).detach().cpu()).reshape(x.shape)
-    truth = _exact_subspace_gram(operators_for(cycled, shape), basis, x)
+    truth = _exact_subspace_gram(exact_gram, cycled, shape, basis, x)
     assert np.linalg.norm(fast - truth) / np.linalg.norm(truth) < 1e-3
 
 

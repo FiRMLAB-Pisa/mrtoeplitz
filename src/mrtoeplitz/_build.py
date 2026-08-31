@@ -10,9 +10,9 @@ even for a strictly ball-supported trajectory, and cannot be truncated. The
 gridded transfer holds weight only where the scan reached plus the
 interpolation rim, which is what makes it compressible.
 
-An operator here is anything exposing ``shape``, ``samples``, ``norm_factor``
-and optionally ``density`` and ``backend`` -- an MRI-NUFFT operator satisfies
-it, and so does a caller's own.
+Where the transform runs follows the trajectory: a trajectory on the host is
+gridded by FINUFFT, one on a device by CUFINUFFT. A kernel moves afterwards
+with :meth:`~mrtoeplitz.CompactToeplitzKernel.to`.
 """
 
 from __future__ import annotations
@@ -25,13 +25,10 @@ __all__ = [
 ]
 
 from collections.abc import Sequence
-from contextlib import contextmanager, suppress
-from functools import wraps
 from importlib import import_module
 from math import isqrt, prod
 from typing import Any
 
-from ._backend import _mrinufft_norm_factor, _require_mrinufft
 from ._kernel import (
     CompactToeplitzKernel,
     PolyphaseToeplitzKernel,
@@ -39,18 +36,10 @@ from ._kernel import (
     polyphase_components,
 )
 from ._options import _support_locations, _toeplitz_options
+from ._psf import psf_plan, within_psf_plans
 
 #: Public name for the options validator.
 toeplitz_options = _toeplitz_options
-
-
-_PSF_OPERATOR_SLOT: dict[tuple[Any, ...], Any] = {}
-
-_PSF_TOLERANCE = 1e-4
-
-_NARROW_PSF_TOLERANCE = 1e-3
-
-_NARROW_PSF_UPSAMPLING = 1.25
 
 
 def _flat_samples(trajectory: Any, image_ndim: int) -> Any:
@@ -83,125 +72,10 @@ def _flat_density(density: Any | None, n_samples: int) -> Any | None:
     return weights
 
 
-def _psf_operator(
-    samples: Any,
-    backend: str,
-    spatial_shape: tuple[int, ...],
-) -> Any:
-    """Return a NUFFT on the doubled grid, for gridding the transfer onto it.
-
-    One plan is kept per (backend, grid, sample count) and retargeted at each
-    trajectory it is asked for. Planning a NUFFT is the expensive part of
-    building a kernel, and holding a second plan on the doubled grid is what
-    makes a build run out of device memory.
-    """
-    mrinufft = _require_mrinufft()
-    shape = tuple(int(size) for size in spatial_shape)
-    key = (backend, shape, int(samples.shape[0]))
-    operator = _PSF_OPERATOR_SLOT.get(key)
-    if operator is not None:
-        operator.update_samples(samples)
-        return operator
-    build = mrinufft.get_operator(backend)
-    _yield_cached_device_memory(getattr(samples, "device", None))
-    settings: dict[str, Any] = _psf_settings(shape, samples)
-    try:
-        operator = build(
-            samples=samples,
-            shape=shape,
-            density=None,
-            n_coils=1,
-            squeeze_dims=False,
-            **settings,
-        )
-    except TypeError:
-        operator = build(
-            samples=samples,
-            shape=shape,
-            density=None,
-            n_coils=1,
-            squeeze_dims=False,
-        )
-    # One slot: a plan on the doubled grid is the largest device allocation a
-    # build makes, and holding a second one is what makes a build run out.
-    _PSF_OPERATOR_SLOT.clear()
-    _PSF_OPERATOR_SLOT[key] = operator
-    return operator
-
-
-def _yield_cached_device_memory(device: Any) -> None:
-    """Hand the allocator's spare blocks back to the driver.
-
-    A NUFFT plan is allocated outside Torch, so blocks Torch is holding for
-    reuse are neither available to it nor counted as free -- and Torch does
-    not release them when another library runs out. What a build measures and
-    what it can take are both only true once these are returned.
-    """
-    torch = import_module("torch")
-    if "cuda" not in str(device):
-        return
-    with suppress(RuntimeError):
-        torch.cuda.empty_cache()
-
-
-def _psf_settings(shape: tuple[int, ...], samples: Any) -> dict[str, Any]:
-    """Return what to plan the gridding NUFFT with, for the room there is.
-
-    A NUFFT spreads onto a grid of its own on the way to the one it answers
-    on; that grid is internal and does not touch the transfer, so it is chosen
-    for what it costs. The wide one is the default. On the doubled grid a
-    kernel is built on it is eight times the transfer, so at these sizes it
-    stops fitting, and the narrow one is asked for a looser tolerance -- which
-    keeps its interpolation kernel the width the wide one has, and spends the
-    difference on the transfer rather than on every point spread onto it.
-    """
-    torch = import_module("torch")
-    narrow = {"eps": _NARROW_PSF_TOLERANCE, "upsampfac": _NARROW_PSF_UPSAMPLING}
-    # NumPy answers `device` with a plain string, Torch with an object.
-    device = getattr(samples, "device", None)
-    if "cuda" not in str(device):
-        return {"eps": _PSF_TOLERANCE}
-    free, _ = torch.cuda.mem_get_info(device)
-    spreading = 8 * (2 ** len(shape)) * prod(shape)
-    wide = spreading + 8 * prod(shape) + 8 * int(samples.shape[0])
-    return {"eps": _PSF_TOLERANCE} if wide < 0.6 * free else narrow
-
-
-def _within_psf_plans(build: Any) -> Any:
-    """Release the gridding plan a builder makes when its build ends."""
-
-    @wraps(build)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        with _psf_plans():
-            return build(*args, **kwargs)
-
-    return wrapper
-
-
-@contextmanager
-def _psf_plans() -> Any:
-    """Hold one gridding plan for the length of a build, then release it.
-
-    A plan on the doubled grid is the largest device allocation a build makes
-    -- larger than the kernel it produces -- and the solve that follows needs
-    that memory for its own transforms.
-    """
-    try:
-        yield
-    finally:
-        _PSF_OPERATOR_SLOT.clear()
-        with suppress(ImportError, AttributeError):
-            torch = import_module("torch")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-
 def _compute_toeplitz_transfer(
     samples: Any,
     image_shape: tuple[int, ...],
     weights: Any | None = None,
-    *,
-    backend: str = "finufft",
 ) -> Any:
     """Return the transfer a Toeplitz normal operator multiplies by.
 
@@ -211,7 +85,7 @@ def _compute_toeplitz_transfer(
     off-resonance segment -- and the transfer is its transform.
 
     Gridding is what puts the weight where the trajectory is. The adjoint
-    interpolates each sample onto the doubled grid with the backend's own
+    interpolates each sample onto the doubled grid with the transform's own
     kernel, so the transfer holds weight where the scan reached and in the rim
     that interpolation spreads into, and nowhere else. That is the same
     operator the forward NUFFT applies, so the normal is the Gram of the
@@ -220,11 +94,11 @@ def _compute_toeplitz_transfer(
     torch = import_module("torch")
     samples = as_torch(samples)
     spatial_shape = tuple(2 * size for size in image_shape)
-    operator = _psf_operator(samples, backend, spatial_shape)
+    plan = psf_plan(spatial_shape, samples)
 
     if weights is None:
         values = torch.ones(
-            operator.n_samples,
+            plan.n_samples,
             dtype=torch.complex64,
             device=samples.device,
         )
@@ -233,12 +107,14 @@ def _compute_toeplitz_transfer(
 
     # Backends differ on whether they take a bare sample vector, so the
     # batch and coil axes are stated and dropped again.
-    psf = as_torch(operator.adj_op(values.reshape(1, 1, -1))).reshape(spatial_shape)
+    psf = plan.grid(values).reshape(spatial_shape)
     axes = tuple(range(len(spatial_shape)))
     # ``adj_op`` answers a centred image and divides by the doubled grid's own
     # normalization, while the normal operator this stands in for carries the
     # image grid's twice -- once in the forward and once in the adjoint.
-    scale = float(operator.norm_factor) / _mrinufft_norm_factor(image_shape) ** 2
+    # The transform is raw, and the convolution runs on the doubled grid,
+    # so that grid's size is the whole normalization.
+    scale = 1.0 / prod(spatial_shape)
     return torch.fft.fftn(torch.fft.ifftshift(psf, dim=axes), dim=axes) * scale
 
 
@@ -356,13 +232,12 @@ def _selected_transfer(
     return selected.to("cpu") if streaming is not None else selected
 
 
-@_within_psf_plans
+@within_psf_plans
 def scalar_kernel(
     trajectory: Any,
     image_shape: tuple[int, ...],
     *,
     density: Any | None = None,
-    backend: str = "finufft",
     options: dict[str, Any] | None = None,
     streaming: Any | None = None,
 ) -> CompactToeplitzKernel:
@@ -383,8 +258,6 @@ def scalar_kernel(
         ``None`` weights every sample equally. Density inside the normal is
         the intended acceleration, not a defect: an adjoint applies it once,
         so the Gram does too.
-    backend
-        MRI-NUFFT backend used to grid the point spread function.
     options
         As :func:`toeplitz_options`.
     streaming
@@ -423,7 +296,7 @@ def scalar_kernel(
     spatial_shape = tuple(2 * size for size in image_shape)
 
     transfer = as_torch(
-        _compute_toeplitz_transfer(samples, image_shape, weights, backend=backend)
+        _compute_toeplitz_transfer(samples, image_shape, weights)
     ).flatten()
     indices = _support_locations(
         samples,
@@ -464,7 +337,6 @@ def _centring_signs(indices: Any, spatial_shape: tuple[int, ...]) -> Any:
 
 def _subspace_pair_transfers(
     blocks: Sequence[tuple[Any, Any, Any]],
-    backend: str,
     image_shape: tuple[int, ...],
     samples: Any,
     counts: Sequence[int],
@@ -505,10 +377,12 @@ def _subspace_pair_transfers(
     repeats = torch.tensor(counts, device=samples.device)
     coefficients = torch.stack([block[2] for block in blocks], dim=1)
 
-    operator = _psf_operator(samples, backend, spatial_shape)
+    plan = psf_plan(spatial_shape, samples)
     axes = tuple(range(len(spatial_shape)))
     signs = _centring_signs(indices, spatial_shape)
-    scale = float(operator.norm_factor) / _mrinufft_norm_factor(image_shape) ** 2
+    # The transform is raw, and the convolution runs on the doubled grid,
+    # so that grid's size is the whole normalization.
+    scale = 1.0 / prod(spatial_shape)
     n_pairs = int(blocks[0][2].numel())
     left_out = _complement_of(indices, prod(spatial_shape), samples.device)
     dropped = 0.0
@@ -521,7 +395,7 @@ def _subspace_pair_transfers(
             values = values * weights
         values_view = values.reshape(1, 1, -1)
         del values
-        psf = as_torch(operator.adj_op(values_view)).reshape(spatial_shape)
+        psf = plan.grid(values_view).reshape(spatial_shape)
         # Transformed in place, and the centring folded into a sign on the
         # locations kept: shifting the point-spread function by half the grid
         # is the same as alternating the sign of what comes out, and a copy of
@@ -553,7 +427,6 @@ def _subspace_kernel_from_blocks(
     blocks: Sequence[tuple[Any, Any, Any]],
     image_shape: tuple[int, ...],
     *,
-    backend: str = "finufft",
     options: dict[str, Any] | None = None,
     streaming: Any | None = None,
 ) -> CompactToeplitzKernel:
@@ -594,7 +467,6 @@ def _subspace_kernel_from_blocks(
     )
     packed, dropped = _subspace_pair_transfers(
         stripped,
-        backend,
         image_shape,
         samples,
         counts,
@@ -695,7 +567,6 @@ def subspace_kernel(
     image_shape: tuple[int, ...],
     *,
     density: Any | None = None,
-    backend: str = "finufft",
     options: dict[str, Any] | None = None,
     streaming: Any | None = None,
 ) -> CompactToeplitzKernel:
@@ -726,8 +597,6 @@ def subspace_kernel(
         Sample weights, broadcastable to the trajectory without its axes --
         ``(points,)``, ``(shots, points)`` or ``(frames, shots, points)``.
         ``None`` weights every sample equally.
-    backend
-        MRI-NUFFT backend used to grid the point spread function.
     options
         As :func:`toeplitz_options`.
     streaming
@@ -811,7 +680,6 @@ def subspace_kernel(
     return _subspace_kernel_from_blocks(
         blocks,
         image_shape,
-        backend=backend,
         options=options,
         streaming=streaming,
     )

@@ -19,7 +19,6 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _distribution_version
 
-from ._backend import register_torch_cufinufft
 from ._build import (
     cartesian_subspace_kernel,
     scalar_kernel,
@@ -53,7 +52,6 @@ __all__ = [
     "cartesian_subspace_kernel",
     "occupancy_indices",
     "polyphase_components",
-    "register_torch_cufinufft",
     "scalar_kernel",
     "significant_indices",
     "subspace_kernel",

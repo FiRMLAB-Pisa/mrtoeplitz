@@ -38,12 +38,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Building a transfer grids a point spread function, which is a NUFFT.
-# Applying an already-built kernel needs none of this.
-nufft = ["mri-nufft[finufft]>=1.0"]
+# Building a transfer grids a point spread function, which is one type-1
+# NUFFT. Applying an already-built kernel needs none of this.
+nufft = ["finufft>=2.5"]
+# CUFINUFFT reads anything exposing __cuda_array_interface__, so it takes Torch
+# tensors directly and no second CUDA array library is involved.
 cuda = ["cufinufft>=2.5.1; platform_system == 'Linux'"]
 dev = [
-  "mrtoeplitz[nufft]",
+  "mrtoeplitz[nufft,cuda]",
   "pytest>=8",
   "pytest-cov>=5",
   "coverage>=7",

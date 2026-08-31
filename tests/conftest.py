@@ -55,21 +55,37 @@ def radial():
 
 
 @pytest.fixture
-def operator(radial):
-    """An MRI-NUFFT operator, for computing the reference Gram the slow way.
+def exact_gram():
+    """``A^H A x`` computed with raw FINUFFT, as the yardstick.
 
-    Nothing in the package takes one of these any more; it is the yardstick.
+    ``A`` is a type-2 transform with ``isign=-1`` and ``A^H`` a type-1 with
+    ``isign=+1`` -- the standard unnormalised adjoint pair -- divided by the
+    size of the doubled grid the convolution runs on, which is the whole
+    normalization the package uses. Nothing here comes from the package, so a
+    kernel agreeing with it is evidence rather than self-consistency.
     """
-    mrinufft = pytest.importorskip("mrinufft")
+    finufft = pytest.importorskip("finufft")
 
-    def build(shape=(32, 32), n_spokes=48, n_samples=64, density=None):
-        return mrinufft.get_operator("finufft")(
-            samples=radial(n_spokes, n_samples).reshape(-1, 2),
-            shape=shape,
-            density=density,
-            n_coils=1,
-            squeeze_dims=False,
+    def build(trajectory, image_shape, image, density=None):
+        points = np.ascontiguousarray(
+            np.asarray(trajectory, dtype=np.float64).reshape(-1, len(image_shape))
+            * 2
+            * np.pi
         )
+        columns = [
+            np.ascontiguousarray(points[:, axis]) for axis in range(points.shape[1])
+        ]
+
+        forward = finufft.Plan(2, image_shape, isign=-1, eps=1e-9, dtype="complex128")
+        forward.setpts(*columns)
+        adjoint = finufft.Plan(1, image_shape, isign=+1, eps=1e-9, dtype="complex128")
+        adjoint.setpts(*columns)
+
+        measured = forward.execute(np.asarray(image, dtype=np.complex128))
+        if density is not None:
+            measured = measured * np.asarray(density, dtype=np.float64).reshape(-1)
+        gridded = adjoint.execute(measured)
+        return gridded / np.prod([2 * size for size in image_shape])
 
     return build
 
@@ -83,17 +99,6 @@ def image():
         return (rng.normal(size=shape) + 1j * rng.normal(size=shape)).astype(
             np.complex64
         )
-
-    return build
-
-
-@pytest.fixture
-def exact_gram():
-    """``A^H A x`` computed the slow, unarguable way."""
-
-    def build(op, x):
-        shape = tuple(int(size) for size in op.shape)
-        return np.asarray(op.adj_op(op.op(x.reshape(1, 1, *shape)))).reshape(shape)
 
     return build
 
