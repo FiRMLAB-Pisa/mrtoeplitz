@@ -504,8 +504,18 @@ class PolyphaseToeplitzKernel:
 
     @property
     def compression_ratio(self) -> float:
-        dense = self.dense_nbytes
-        return self.storage_nbytes / dense if dense else 1.0
+        """Dense-complex bytes divided by compact persistent bytes."""
+        if self.storage_nbytes == 0:
+            return float("inf")
+        return self.dense_nbytes / self.storage_nbytes
+
+    def __repr__(self) -> str:
+        return (
+            f"PolyphaseToeplitzKernel(rank={self.rank}, "
+            f"image_shape={self.image_shape}, "
+            f"components={len(self.components)}, "
+            f"compression={self.compression_ratio:.2f}x)"
+        )
 
     @property
     def values(self) -> Any:
@@ -860,6 +870,14 @@ class CompactToeplitzKernel:
         if self.storage_nbytes == 0:
             return float("inf")
         return self.dense_nbytes / self.storage_nbytes
+
+    def __repr__(self) -> str:
+        return (
+            f"CompactToeplitzKernel(rank={self.rank}, "
+            f"image_shape={self.image_shape}, "
+            f"locations={self.n_locations}, "
+            f"compression={self.compression_ratio:.2f}x)"
+        )
 
     @property
     def last_cuda_mode(self) -> str | None:

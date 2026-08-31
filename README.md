@@ -23,8 +23,8 @@ grid and the doubled one is never materialised.
 
 **Added here:**
 
-- **bfloat16 transfers** on natively capable devices, halving what a real
-  transfer occupies for about two decimal digits
+- **bfloat16 transfers** on natively capable devices, halving what the card
+  holds and what crosses the bus, for about two decimal digits
 - **Dual-stream host staging** — a transfer larger than the card stays in
   pinned host memory and arrives in chunks, the copy of one overlapping the
   multiply of the one before
@@ -65,6 +65,8 @@ kernel = mt.scalar_kernel(trajectory, image_shape=(256, 256))  # (shots, points,
 normal = kernel(image[None, None])  # (batch, rank, *image_shape)
 ```
 
+![a normal operator against the NUFFT pair it replaces](examples/figures/scalar.png)
+
 [`examples/scalar.ipynb`](examples/scalar.ipynb)
 
 ### Subspace
@@ -81,6 +83,8 @@ kernel = mt.subspace_kernel(trajectory, basis, image_shape=(256, 256))
 or its transpose. The frames axis is contrasts for qMRI and time for a dynamic
 scan.
 
+![a subspace normal against the definition](examples/figures/subspace.png)
+
 [`examples/subspace.ipynb`](examples/subspace.ipynb)
 
 ### Cartesian subspace
@@ -90,6 +94,8 @@ No gridding and no doubled grid — the normal is the sampling mask itself.
 ```python
 kernel = mt.cartesian_subspace_kernel(masks, basis)
 ```
+
+![the Cartesian subspace normal](examples/figures/cartesian.png)
 
 [`examples/cartesian.ipynb`](examples/cartesian.ipynb)
 
@@ -108,6 +114,8 @@ kernels = mt.CoilKernels(calibration_kernels, image_shape=(320, 320, 320))
 normal = mt.apply_sense(kernel, image, kernels)
 ```
 
+![sensitivities as k-space kernels](examples/figures/coil_kernels.png)
+
 [`examples/coil_kernels.ipynb`](examples/coil_kernels.ipynb)
 
 ### Streaming a transfer that will not fit
@@ -121,6 +129,8 @@ kernel = mt.scalar_kernel(trajectory, (320, 320, 320), streaming=policy)
 normal = kernel(image)
 ```
 
+![a streamed transfer against a resident one](examples/figures/streaming.png)
+
 [`examples/streaming.ipynb`](examples/streaming.ipynb)
 
 ### Gradients
@@ -129,6 +139,8 @@ normal = kernel(image)
 image = torch.randn(1, 1, 256, 256, dtype=torch.complex64, requires_grad=True)
 kernel(image).abs().sum().backward()
 ```
+
+![gradients through the normal operator](examples/figures/unrolled.png)
 
 [`examples/unrolled.ipynb`](examples/unrolled.ipynb)
 

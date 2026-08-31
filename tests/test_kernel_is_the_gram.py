@@ -206,3 +206,30 @@ def test_samples_are_read_on_the_half_open_minus_half_to_half_scale():
     )
     kept = mt.occupancy_indices(quarter, grid, width=0).numel() / (32 * 32)
     assert 0.2 < kept < 0.3
+
+
+def test_both_layouts_report_compression_the_same_way_round(radial):
+    """A ratio above one means smaller, in either layout.
+
+    The two classes answer the same question with different machinery, and a
+    reciprocal in one of them reads as growth where there was a saving.
+    """
+    trajectory = radial(n_spokes=64, n_samples=96)
+    for polyphase in (True, False):
+        kernel = mt.scalar_kernel(
+            trajectory, (48, 48), options=mt.toeplitz_options(polyphase=polyphase)
+        )
+        assert kernel.compression_ratio == pytest.approx(
+            kernel.dense_nbytes / kernel.storage_nbytes
+        )
+        assert kernel.compression_ratio > 1.0
+
+
+def test_a_kernel_says_what_it_is(radial):
+    for polyphase, name in ((True, "Polyphase"), (False, "Compact")):
+        kernel = mt.scalar_kernel(
+            radial(), (32, 32), options=mt.toeplitz_options(polyphase=polyphase)
+        )
+        text = repr(kernel)
+        assert text.startswith(f"{name}ToeplitzKernel(")
+        assert "rank=1" in text and "image_shape=(32, 32)" in text
