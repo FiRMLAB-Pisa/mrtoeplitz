@@ -1,0 +1,5 @@
+[deps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+MRISubspaceRecon = "81225dec-f002-11f0-8080-35af0c2c6e2d"
+NPZ = "15e1cf62-19b3-5cfa-8e77-841668bca605"
