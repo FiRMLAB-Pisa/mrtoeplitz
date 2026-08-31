@@ -581,6 +581,7 @@ def _grouped_frames(samples: Any) -> dict[bytes, list[int]]:
     return groups
 
 
+@within_psf_plans
 def subspace_kernel(
     trajectory: Any,
     basis: Any,
@@ -710,6 +711,7 @@ def subspace_kernel(
     )
 
 
+@within_psf_plans
 def cartesian_subspace_kernel(
     masks: Any,
     basis: Any,

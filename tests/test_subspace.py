@@ -288,3 +288,23 @@ def test_a_square_basis_reads_as_frames_by_rank(rotated):
     # hand has to reach the other one rather than being absorbed.
     difference = (reference - other(x)).abs().max() / reference.abs().max()
     assert float(difference) > 1e-3
+
+
+def test_a_build_does_not_keep_its_gridding_plan(rotated):
+    """The plan is the largest allocation a build makes, larger than what it
+    produces, and the solve that follows needs that memory for its own
+    transforms. Every builder has to release it, not just the scalar one.
+    """
+    from mrtoeplitz import _psf
+
+    trajectory, shape = rotated(n_frames=4)
+    rng = np.random.default_rng(7)
+    basis = rng.normal(size=(4, 2)).astype(np.float32)
+
+    _psf._PLAN_SLOT.clear()
+    mt.subspace_kernel(trajectory, basis, shape, options=SINGLE)
+    assert not _psf._PLAN_SLOT
+
+    masks = (rng.random((4, *shape)) < 0.5).astype(np.float32)
+    mt.cartesian_subspace_kernel(masks, basis, options=SINGLE)
+    assert not _psf._PLAN_SLOT
