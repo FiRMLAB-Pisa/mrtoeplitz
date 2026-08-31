@@ -16,7 +16,7 @@ import mrtoeplitz as mt
 
 def _apply(kernel, x, device):
     tensor = torch.as_tensor(x)[None, None].to(device)
-    return np.asarray(kernel.to(device).apply(tensor).detach().cpu()).reshape(x.shape)
+    return np.asarray(kernel.to(device)(tensor).detach().cpu()).reshape(x.shape)
 
 
 #: What a kernel agrees with the exact Gram to, in single precision. The CUDA

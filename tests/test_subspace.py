@@ -76,7 +76,7 @@ def test_the_subspace_kernel_reproduces_the_exact_subspace_gram(
 
     kernel = mt.subspace_kernel(trajectory, basis, shape, options=SINGLE)
     fast = np.asarray(
-        kernel.to(device).apply(torch.as_tensor(x)[None].to(device)).detach().cpu()
+        kernel.to(device)(torch.as_tensor(x)[None].to(device)).detach().cpu()
     ).reshape(x.shape)
 
     truth = _exact_subspace_gram(operators_for(trajectory, shape), basis, x)
@@ -94,9 +94,7 @@ def test_a_shared_trajectory_reproduces_the_exact_subspace_gram(rotated, operato
     )
 
     kernel = mt.subspace_kernel(shared, basis, shape, options=SINGLE)
-    fast = np.asarray(kernel.apply(torch.as_tensor(x)[None]).detach().cpu()).reshape(
-        x.shape
-    )
+    fast = np.asarray(kernel(torch.as_tensor(x)[None]).detach().cpu()).reshape(x.shape)
 
     repeated = np.stack([shared] * 5)
     truth = _exact_subspace_gram(operators_for(repeated, shape), basis, x)
@@ -154,9 +152,7 @@ def test_grouping_does_not_change_the_operator(rotated, operators_for):
     )
 
     kernel = mt.subspace_kernel(cycled, basis, shape, options=SINGLE)
-    fast = np.asarray(kernel.apply(torch.as_tensor(x)[None]).detach().cpu()).reshape(
-        x.shape
-    )
+    fast = np.asarray(kernel(torch.as_tensor(x)[None]).detach().cpu()).reshape(x.shape)
     truth = _exact_subspace_gram(operators_for(cycled, shape), basis, x)
     assert np.linalg.norm(fast - truth) / np.linalg.norm(truth) < 1e-3
 

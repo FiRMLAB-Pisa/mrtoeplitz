@@ -38,8 +38,9 @@ def device(request):
 def radial():
     """A 2D radial trajectory as (shots, points, axes).
 
-    Samples are in the [-0.5, 0.5) units MRI-NUFFT expects -- unscaled by the
-    grid, which is what the builders take.
+    Samples are in normalized k-space: -0.5 is grid location -kN/2 of a grid
+    of size kN, and 0.5 is +kN/2. The same numbers therefore describe the
+    image grid and the doubled grid the transfer lives on.
     """
 
     def build(n_spokes=48, n_samples=64):

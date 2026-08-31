@@ -372,8 +372,10 @@ def scalar_kernel(
     ----------
     trajectory
         ``(shots, points, axes)``, or ``(points, axes)`` for a single shot.
-        ``axes`` is the image's dimensionality, and the samples are in the
-        ``[-0.5, 0.5)`` units MRI-NUFFT expects -- unscaled by the grid.
+        ``axes`` is the image's dimensionality. Samples are in normalized
+        k-space: ``-0.5`` is grid location ``-kN/2`` of a grid of size
+        ``kN`` and ``0.5`` is ``+kN/2``, so the same numbers describe
+        the image grid and the doubled one the transfer lives on.
     image_shape
         The image grid. The transfer is built on twice this in every dimension.
     density
@@ -710,8 +712,10 @@ def subspace_kernel(
     trajectory
         ``(shots, points, axes)`` for one trajectory every frame shares, or
         ``(frames, shots, points, axes)`` for one per frame. ``axes`` is the
-        image's dimensionality, and the samples are in the ``[-0.5, 0.5)``
-        units MRI-NUFFT expects -- unscaled by the grid.
+        image's dimensionality. Samples are in normalized k-space: ``-0.5``
+        is grid location ``-kN/2`` of a grid of size ``kN`` and ``0.5``
+        is ``+kN/2``, so the same numbers describe the image grid and
+        the doubled one the transfer lives on.
     basis
         ``(frames, rank)`` or ``(rank, frames)``, whichever way round. The
         frames axis is contrasts for a qMRI scan and time for a dynamic one;

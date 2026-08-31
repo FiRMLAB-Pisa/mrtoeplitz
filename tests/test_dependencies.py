@@ -148,6 +148,6 @@ def test_a_cuda_transfer_is_built_without_importing_cupy():
         options=mt.toeplitz_options(compress=False, cuda_transfer_precision="float32"),
     )
     image = torch.randn(1, 1, 32, 32, dtype=torch.complex64, device="cuda")
-    kernel.to("cuda").apply(image)
+    kernel.to("cuda")(image)
 
     assert "cupy" not in sys.modules

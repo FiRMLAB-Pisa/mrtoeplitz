@@ -95,7 +95,7 @@ def _coils_split_across_devices(
     return total
 
 
-def apply_sense(
+def _apply_sense(
     kernel: CompactToeplitzKernel,
     image: Any,
     maps: Any | None = None,
@@ -286,7 +286,7 @@ def apply_sense(
             transformed = (
                 kernel.apply_streamed(coil_images, streaming)
                 if streaming is not None and coil_images.device.type == "cpu"
-                else kernel.apply(coil_images)
+                else kernel._apply(coil_images)
             )
         if left_factors is not None:
             transformed = (
@@ -308,3 +308,103 @@ def apply_sense(
             )
     kernel.settle_allocator()
     return result
+
+
+_SENSE_FUNCTION: Any = None
+
+
+def _sense_function() -> Any:
+    """Return the autograd Function the SENSE normal is applied through."""
+    global _SENSE_FUNCTION
+    if _SENSE_FUNCTION is not None:
+        return _SENSE_FUNCTION
+    torch = import_module("torch")
+
+    class _SenseApply(torch.autograd.Function):
+        """The SENSE normal, differentiable in the image.
+
+        ``sum_c conj(m_c) N (m_c x)`` is Hermitian whenever ``N`` is, so like
+        the bare transfer it is its own adjoint and the backward pass is one
+        more application. Nothing from the forward pass is kept, which is what
+        makes it usable inside an unrolled network at the sizes this package
+        exists for.
+        """
+
+        @staticmethod
+        def forward(image: Any, kernel: Any, maps: Any, settings: dict) -> Any:
+            with torch.no_grad():
+                return _apply_sense(kernel, image, maps, **settings)
+
+        @staticmethod
+        def setup_context(ctx: Any, inputs: tuple[Any, ...], _output: Any) -> None:
+            ctx.held = inputs[1:]
+
+        @staticmethod
+        def backward(ctx: Any, grad_output: Any) -> tuple[Any, None, None, None]:
+            kernel, maps, settings = ctx.held
+            with torch.no_grad():
+                grad = _apply_sense(kernel, grad_output.contiguous(), maps, **settings)
+            return grad, None, None, None
+
+    _SENSE_FUNCTION = _SenseApply
+    return _SENSE_FUNCTION
+
+
+def apply_sense(
+    kernel: CompactToeplitzKernel,
+    image: Any,
+    maps: Any | None = None,
+    *,
+    right_factors: Any | None = None,
+    left_factors: Any | None = None,
+    coil_batch_size: int = 1,
+    streaming: Any | None = None,
+) -> Any:
+    """Apply a transfer through coil sensitivities, with a gradient.
+
+    Parameters
+    ----------
+    kernel
+        The normal operator, from :func:`~mrtoeplitz.scalar_kernel` or a
+        subspace builder.
+    image
+        ``(batch, rank, *image_shape)``, complex.
+    maps
+        Sensitivities as ``(coils, *image_shape)``, with a leading batch axis,
+        or as a :class:`~mrtoeplitz.CoilKernels` bank. ``None`` applies the
+        normal without coils.
+    right_factors, left_factors
+        Spatial factors folded into the pass either side of the transfer.
+        Giving them makes the operator something other than its own adjoint,
+        so the result is not differentiable.
+    coil_batch_size
+        Coils per pass. One keeps the least in flight.
+    streaming
+        Where a transfer too large for the device is staged.
+
+    Returns
+    -------
+    array
+        ``sum_c conj(m_c) N(m_c x)``, shaped like ``image``. Differentiable in
+        ``image`` when no factors are given.
+
+    Raises
+    ------
+    ValueError
+        If a gradient is asked for through explicit factors.
+    """
+    settings = {
+        "right_factors": right_factors,
+        "left_factors": left_factors,
+        "coil_batch_size": coil_batch_size,
+        "streaming": streaming,
+    }
+    if right_factors is None and left_factors is None:
+        return _sense_function().apply(image, kernel, maps, settings)
+    if getattr(image, "requires_grad", False):
+        raise ValueError(
+            "explicit factors make the SENSE normal something other than its "
+            "own adjoint, so it is not differentiable; apply them yourself, or "
+            "drop them to differentiate"
+        )
+    return _apply_sense(kernel, image, maps, **settings)

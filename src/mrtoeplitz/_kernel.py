@@ -212,6 +212,52 @@ def as_torch(value: Any, *, device: Any | None = None) -> Any:
     return result.to(device=device) if device is not None else result
 
 
+_APPLY_FUNCTION: Any = None
+
+
+def _apply_function() -> Any:
+    """Return the autograd Function the kernels are applied through.
+
+    Built on first use because Torch is imported lazily throughout this module.
+    """
+    global _APPLY_FUNCTION
+    if _APPLY_FUNCTION is not None:
+        return _APPLY_FUNCTION
+    torch = _torch()
+
+    class _ToeplitzApply(torch.autograd.Function):
+        """The normal operator, differentiable in the image.
+
+        A normal operator is a Gram, so it is Hermitian and is its own
+        adjoint: the gradient of ``y = N x`` with respect to ``x`` is one more
+        application of ``N``, and nothing from the forward pass has to be kept
+        to compute it.
+
+        That is worth more here than it usually would be. The lanes that make
+        a large transfer fit transform into a buffer they reuse, with ``out=``,
+        and Torch cannot differentiate through that at all -- so this is not a
+        cheaper alternative to tracing the forward pass, it is the only way the
+        operator is differentiable.
+        """
+
+        @staticmethod
+        def forward(image: Any, kernel: Any) -> Any:
+            with torch.no_grad():
+                return kernel._apply(image)
+
+        @staticmethod
+        def setup_context(ctx: Any, inputs: tuple[Any, ...], _output: Any) -> None:
+            ctx.toeplitz_kernel = inputs[1]
+
+        @staticmethod
+        def backward(ctx: Any, grad_output: Any) -> tuple[Any, None]:
+            with torch.no_grad():
+                return ctx.toeplitz_kernel._apply(grad_output.contiguous()), None
+
+    _APPLY_FUNCTION = _ToeplitzApply
+    return _APPLY_FUNCTION
+
+
 def support_indices(
     spatial_shape: tuple[int, ...],
     *,
@@ -282,9 +328,9 @@ def occupancy_indices(
     Parameters
     ----------
     samples
-        Trajectory in the ``[-0.5, 0.5)`` units every entry point of this
-        package takes, ``(..., ndim)``. MRI-NUFFT rescales these to its own
-        ``[-pi, pi)`` internally; nothing here does.
+        Trajectory in normalized k-space, ``(..., ndim)``: a sample at
+        ``-0.5`` is grid location ``-kN/2`` and one at ``0.5`` is
+        ``+kN/2``, so placing a sample is a multiply by the grid size.
     spatial_shape
         The transfer grid, twice the image in each dimension.
     width
@@ -307,8 +353,9 @@ def occupancy_indices(
         raise ValueError("samples must end in one coordinate per spatial axis")
     coordinates = coordinates.reshape(-1, ndim).to(torch.float32)
     sizes = torch.tensor(spatial_shape, device=coordinates.device)
-    # [-0.5, 0.5) spans the grid, and the transfer is stored unshifted, so the
-    # centre of k-space is index zero.
+    # A sample at +-0.5 is grid location +-kN/2, so placing one is a multiply
+    # by the grid size. The transfer is stored unshifted, so k-space centre
+    # is index zero.
     placed = torch.round(coordinates * sizes).to(torch.int64)
 
     stride = torch.ones(ndim, dtype=torch.int64, device=coordinates.device)
@@ -570,7 +617,24 @@ class PolyphaseToeplitzKernel:
             for _, kernel in self.components
         )
 
-    def apply(self, image: Any) -> Any:
+    def __call__(self, image: Any) -> Any:
+        """Apply the normal operator, with a gradient.
+
+        Parameters
+        ----------
+        image
+            ``(batch, rank, *image_shape)``, complex.
+
+        Returns
+        -------
+        array
+            The normal applied, shaped like ``image``. Differentiable in
+            ``image``: the operator is Hermitian, so the backward pass is one
+            more application and keeps nothing from the forward one.
+        """
+        return _apply_function().apply(image, self)
+
+    def _apply(self, image: Any) -> Any:
         """Apply the matrix-valued convolution, component by component."""
         if self._fusable(image):
             try:
@@ -580,7 +644,7 @@ class PolyphaseToeplitzKernel:
                     raise
                 for _, kernel in self.components:
                     kernel._resident_refused()
-        return self._accumulate(image, lambda kernel, value: kernel.apply(value))
+        return self._accumulate(image, lambda kernel, value: kernel._apply(value))
 
     def apply_streamed(self, image: Any, streaming: Any) -> Any:
         """Apply with each component's transfer streamed from host storage."""
@@ -1032,8 +1096,25 @@ class CompactToeplitzKernel:
             out=out,
         )
 
-    def apply(self, image: Any) -> Any:
-        """Apply the zero-padded matrix-valued convolution to coefficient images."""
+    def __call__(self, image: Any) -> Any:
+        """Apply the normal operator, with a gradient.
+
+        Parameters
+        ----------
+        image
+            ``(batch, rank, *image_shape)``, complex.
+
+        Returns
+        -------
+        array
+            The normal applied, shaped like ``image``. Differentiable in
+            ``image``: the operator is Hermitian, so the backward pass is one
+            more application and keeps nothing from the forward one.
+        """
+        return _apply_function().apply(image, self)
+
+    def _apply(self, image: Any) -> Any:
+        """Apply the convolution without autograd; ``__call__`` adds it."""
         torch = _torch()
         if not isinstance(image, torch.Tensor) or not image.is_complex():
             raise TypeError("image must be a complex torch.Tensor")

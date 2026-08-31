@@ -36,12 +36,20 @@ is the `backend` argument.
 ```python
 import mrtoeplitz as mt
 
-# trajectory: (shots, points, axes), samples in [-0.5, 0.5), unscaled by the grid
+# trajectory: (shots, points, axes) in normalized k-space (see below)
 kernel = mt.scalar_kernel(trajectory, image_shape=(256, 256))
 normal = kernel.apply(image[None, None])  # (batch, rank, *image_shape)
 ```
 
-`kernel.apply` is `AᴴA`, and that is the only claim worth making about it: the
+### Sample scale
+
+Trajectories are in **normalized k-space**: a sample at `-0.5` is grid location
+`-kN/2` of an oversampled grid of size `kN`, and one at `+0.5` is `+kN/2`. So
+placing a sample on a grid is a multiply by that grid's size, and the same
+numbers describe the image grid and the doubled grid the transfer lives on
+without rescaling. Nothing here works in radians.
+
+`kernel(image)` is `AᴴA`, and that is the only claim worth making about it: the
 test suite checks it against `A_adjoint(A(x))` on real trajectories, on both
 devices, because a variant that merely *carries* the right support, packing and
 bound can still compute the wrong operator.
@@ -63,8 +71,7 @@ kernel = mt.subspace_kernel(trajectory, basis, image_shape=(256, 256))
 ```
 
 - `trajectory` is `(shots, points, axes)` when every frame shares one, or
-  `(frames, shots, points, axes)` when they differ. Samples in the
-  `[-0.5, 0.5)` units MRI-NUFFT expects, unscaled by the grid.
+  `(frames, shots, points, axes)` when they differ.
 - `basis` is `(frames, rank)` or `(rank, frames)`, whichever way round. That
   axis is contrasts for a qMRI scan (MRF, FSE) and time for a dynamic one
   (cardiac); nothing here needs to know which.
