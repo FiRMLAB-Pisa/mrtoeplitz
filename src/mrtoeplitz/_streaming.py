@@ -111,7 +111,11 @@ class CudaStreaming:
         count = torch.cuda.device_count()
         if count:
             return tuple(torch.device("cuda", index) for index in range(count))
-        return (torch.device("cuda", torch.cuda.current_device()),)
+        raise RuntimeError(
+            "this policy covers every visible CUDA device and there are none; "
+            "name one explicitly with devices=(...) to describe a machine you "
+            "are not running on"
+        )
 
     @property
     def device_count(self) -> int:

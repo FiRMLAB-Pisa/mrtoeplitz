@@ -67,6 +67,8 @@ def test_streaming_narrows_the_transfer_to_bfloat16_by_default(resident):
     assert 1e-5 < error_at("auto") < 1e-2
 
 
+@pytest.mark.cuda
+@cuda_only
 def test_a_policy_states_the_devices_it_will_use():
     policy = mt.CudaStreaming(streams=2)
     assert policy.streams == 2
@@ -75,6 +77,21 @@ def test_a_policy_states_the_devices_it_will_use():
     assert policy.device_count >= 1
     # One entry per stream worker, round-robin over the GPUs.
     assert len(policy.execution_devices) == 2 * policy.device_count
+
+
+def test_naming_devices_describes_a_machine_you_are_not_on():
+    """An explicit device list needs no driver to enumerate."""
+    policy = mt.CudaStreaming(devices=("cuda:0", "cuda:1"))
+    assert policy.device_count == 2
+    assert len(policy.execution_devices) == 4
+
+
+def test_covering_every_device_says_so_when_there_are_none():
+    policy = mt.CudaStreaming()
+    if torch.cuda.device_count():
+        pytest.skip("this machine has a CUDA device")
+    with pytest.raises(RuntimeError, match="there are none"):
+        _ = policy.device_count
 
 
 def test_a_policy_can_be_narrowed_to_one_device():
