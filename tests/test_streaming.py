@@ -27,10 +27,12 @@ def resident(radial, image):
 @cuda_only
 @pytest.mark.parametrize("streams", [1, 2])
 def test_a_streamed_transfer_computes_the_same_operator(resident, streams):
+    """A kernel built with a policy streams when called; nothing else changes."""
     trajectory, x, truth = resident
     policy = mt.CudaStreaming(streams=streams, transfer_precision="float32")
     kernel = mt.scalar_kernel(trajectory, (32, 32), options=WHOLE, streaming=policy)
-    got = kernel.apply_streamed(x, policy)
+    assert kernel.streaming is policy
+    got = kernel(x)
     error = torch.linalg.vector_norm(got.cpu() - truth) / torch.linalg.vector_norm(
         truth
     )
@@ -56,7 +58,7 @@ def test_streaming_narrows_the_transfer_to_bfloat16_by_default(resident):
     def error_at(precision):
         policy = mt.CudaStreaming(streams=2, transfer_precision=precision)
         kernel = mt.scalar_kernel(trajectory, (32, 32), options=WHOLE, streaming=policy)
-        got = kernel.apply_streamed(x, policy).cpu()
+        got = kernel(x).cpu()
         return float(
             torch.linalg.vector_norm(got - truth) / torch.linalg.vector_norm(truth)
         )
@@ -120,3 +122,26 @@ def test_a_policy_that_cannot_be_honoured_is_refused(field, value, message):
 def test_duplicate_devices_are_refused():
     with pytest.raises(ValueError, match="unique"):
         mt.CudaStreaming(devices=("cuda:0", "cuda:0"))
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_a_streamed_transfer_is_differentiable(resident):
+    """The streamed lane is reached through the same Hermitian backward."""
+    trajectory, _, _ = resident
+    policy = mt.CudaStreaming(streams=2, transfer_precision="float32")
+    kernel = mt.scalar_kernel(trajectory, (32, 32), options=WHOLE, streaming=policy)
+
+    image = torch.randn(1, 1, 32, 32, dtype=torch.complex64, requires_grad=True)
+    seed = torch.randn(1, 1, 32, 32, dtype=torch.complex64)
+    kernel(image).backward(seed)
+
+    with torch.no_grad():
+        expected = kernel(seed)
+    error = torch.linalg.vector_norm(image.grad - expected)
+    assert float(error / torch.linalg.vector_norm(expected)) < 1e-5
+
+
+def test_a_kernel_built_without_a_policy_holds_none(radial):
+    kernel = mt.scalar_kernel(radial(n_spokes=12, n_samples=16), (8, 8))
+    assert kernel.streaming is None

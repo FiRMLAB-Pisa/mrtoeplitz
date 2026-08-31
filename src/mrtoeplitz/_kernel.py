@@ -243,7 +243,7 @@ def _apply_function() -> Any:
         @staticmethod
         def forward(image: Any, kernel: Any) -> Any:
             with torch.no_grad():
-                return kernel._apply(image)
+                return kernel._apply_any(image)
 
         @staticmethod
         def setup_context(ctx: Any, inputs: tuple[Any, ...], _output: Any) -> None:
@@ -252,7 +252,7 @@ def _apply_function() -> Any:
         @staticmethod
         def backward(ctx: Any, grad_output: Any) -> tuple[Any, None]:
             with torch.no_grad():
-                return ctx.toeplitz_kernel._apply(grad_output.contiguous()), None
+                return ctx.toeplitz_kernel._apply_any(grad_output.contiguous()), None
 
     _APPLY_FUNCTION = _ToeplitzApply
     return _APPLY_FUNCTION
@@ -448,6 +448,10 @@ class PolyphaseToeplitzKernel:
     and taken off after it.
     """
 
+    #: The streaming policy this kernel was built for, if any. Set by the
+    #: builder; a kernel built without one applies from wherever it is held.
+    streaming: Any | None = None
+
     def __init__(
         self,
         components: Sequence[tuple[tuple[int, ...], Any]],
@@ -628,11 +632,19 @@ class PolyphaseToeplitzKernel:
         Returns
         -------
         array
-            The normal applied, shaped like ``image``. Differentiable in
-            ``image``: the operator is Hermitian, so the backward pass is one
-            more application and keeps nothing from the forward one.
+            The normal applied, shaped like ``image``. A kernel built with a
+            :class:`~mrtoeplitz.CudaStreaming` policy streams; one built
+            without applies from wherever it is held. Differentiable in
+            ``image`` either way: the operator is Hermitian, so the backward
+            pass is one more application and keeps nothing from the forward.
         """
         return _apply_function().apply(image, self)
+
+    def _apply_any(self, image: Any) -> Any:
+        """Apply through whichever lane this kernel was built for."""
+        if self.streaming is None:
+            return self._apply(image)
+        return self._apply_streamed(image, self.streaming)
 
     def _apply(self, image: Any) -> Any:
         """Apply the matrix-valued convolution, component by component."""
@@ -646,11 +658,11 @@ class PolyphaseToeplitzKernel:
                     kernel._resident_refused()
         return self._accumulate(image, lambda kernel, value: kernel._apply(value))
 
-    def apply_streamed(self, image: Any, streaming: Any) -> Any:
+    def _apply_streamed(self, image: Any, streaming: Any) -> Any:
         """Apply with each component's transfer streamed from host storage."""
         return self._accumulate(
             image,
-            lambda kernel, value: kernel.apply_streamed(value, streaming),
+            lambda kernel, value: kernel._apply_streamed(value, streaming),
         )
 
 
@@ -714,6 +726,10 @@ class CompactToeplitzKernel:
     is given in the same units as the transfer handed in, and is held in the
     same units the transfer is stored in.
     """
+
+    #: The streaming policy this kernel was built for, if any. Set by the
+    #: builder; a kernel built without one applies from wherever it is held.
+    streaming: Any | None = None
 
     def __init__(
         self,
@@ -1107,11 +1123,19 @@ class CompactToeplitzKernel:
         Returns
         -------
         array
-            The normal applied, shaped like ``image``. Differentiable in
-            ``image``: the operator is Hermitian, so the backward pass is one
-            more application and keeps nothing from the forward one.
+            The normal applied, shaped like ``image``. A kernel built with a
+            :class:`~mrtoeplitz.CudaStreaming` policy streams; one built
+            without applies from wherever it is held. Differentiable in
+            ``image`` either way: the operator is Hermitian, so the backward
+            pass is one more application and keeps nothing from the forward.
         """
         return _apply_function().apply(image, self)
+
+    def _apply_any(self, image: Any) -> Any:
+        """Apply through whichever lane this kernel was built for."""
+        if self.streaming is None:
+            return self._apply(image)
+        return self._apply_streamed(image, self.streaming)
 
     def _apply(self, image: Any) -> Any:
         """Apply the convolution without autograd; ``__call__`` adds it."""
@@ -1871,7 +1895,7 @@ class CompactToeplitzKernel:
         with suppress(RuntimeError):
             self.values = self.values.pin_memory()
 
-    def apply_streamed(
+    def _apply_streamed(
         self,
         image: Any,
         policy: Any,

@@ -12,7 +12,7 @@ from ._kernel import occupancy_indices, support_indices
 def _toeplitz_options(
     *,
     compress: bool = True,
-    polyphase: bool | str = "auto",
+    polyphase: bool | str = True,
     chunk_size: int = 65536,
     coil_batch_size: int = 1,
     cuda_mode: str = "auto",
@@ -39,11 +39,13 @@ def _toeplitz_options(
 
     ``polyphase`` files the transfer as one component per parity of the
     doubled grid's coordinates, so the convolution runs on the image grid and
-    the doubled one is never materialised. It is the same operator either
-    way, and ``"auto"`` picks between them by what the device can hold: the
-    doubled grid is kept while its banks fit, and filed by parity when they
-    would not, which is where the layout decides whether a solve stays
-    resident or falls back to a slower lane.
+    the doubled one is never materialised. It is the same operator either way,
+    and it is the default: the memory is won on every grid, and where the
+    doubled form would not have fitted it is the difference between a solve
+    that stays resident and one that falls back to a slower lane. Where the
+    doubled form does fit, filing by parity costs a few percent of runtime,
+    which is what ``False`` buys back. ``"auto"`` keeps the doubled grid until
+    its banks no longer fit the device budget.
     """
     if chunk_size <= 0:
         raise ValueError("Toeplitz chunk_size must be positive")

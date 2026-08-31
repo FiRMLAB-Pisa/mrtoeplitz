@@ -171,6 +171,7 @@ def _make_kernel(
     image_shape: tuple[int, ...],
     options: dict[str, Any],
     truncation_bound: float = 0.0,
+    streaming: Any | None = None,
 ) -> Any:
     """Build the kernel in the layout the options ask for.
 
@@ -190,7 +191,7 @@ def _make_kernel(
     }
     doubled = tuple(2 * size for size in image_shape) == spatial_shape
     if not _polyphase_wanted(options, spatial_shape, rank, values) or not doubled:
-        return CompactToeplitzKernel(
+        whole = CompactToeplitzKernel(
             values,
             indices,
             spatial_shape,
@@ -198,6 +199,8 @@ def _make_kernel(
             truncation_bound=truncation_bound,
             **settings,
         )
+        whole.streaming = streaming
+        return whole
     components = [
         (
             parity,
@@ -207,12 +210,14 @@ def _make_kernel(
             values, indices, spatial_shape, image_shape
         )
     ]
-    return PolyphaseToeplitzKernel(
+    filed = PolyphaseToeplitzKernel(
         components,
         image_shape,
         rank,
         truncation_bound=truncation_bound,
     )
+    filed.streaming = streaming
+    return filed
 
 
 def _selected_transfer(
@@ -313,6 +318,7 @@ def scalar_kernel(
         1,
         image_shape=image_shape,
         options=options,
+        streaming=streaming,
         truncation_bound=_largest_left_out(transfer.real, left_out),
     )
 
@@ -486,6 +492,7 @@ def _subspace_kernel_from_blocks(
         rank,
         image_shape=image_shape,
         options=options,
+        streaming=streaming,
         truncation_bound=dropped,
     )
 
@@ -766,4 +773,5 @@ def cartesian_subspace_kernel(
         rank,
         image_shape=image_shape,
         options=options,
+        streaming=streaming,
     )

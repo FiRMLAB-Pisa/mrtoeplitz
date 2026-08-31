@@ -17,8 +17,9 @@ symmetry and compact k-space support; this package implements those and adds
 the memory and runtime work on top.
 
 **From the reference implementations:** the gridded construction, support
-compression (BART's `--compress-psf`), and parity decomposition of the doubled
-grid so it is never materialised.
+compression (BART's `--compress-psf`), and the parity decomposition of the
+doubled grid — on by default here, so the convolution always runs on the image
+grid and the doubled one is never materialised.
 
 **Added here:**
 
@@ -111,10 +112,13 @@ normal = mt.apply_sense(kernel, image, kernels)
 
 ### Streaming a transfer that will not fit
 
+The policy is a property of the transfer, so it is given once when the kernel
+is built and calling it streams.
+
 ```python
 policy = mt.CudaStreaming(streams=2)
 kernel = mt.scalar_kernel(trajectory, (320, 320, 320), streaming=policy)
-normal = kernel.apply_streamed(image, policy)
+normal = kernel(image)
 ```
 
 [`examples/streaming.ipynb`](examples/streaming.ipynb)
@@ -151,7 +155,9 @@ The packages this one is measured against, and the work it implements.
   Non-Cartesian MRI.* ISMRM abstract 508-02-001. Reduces Toeplitz-embedded
   subspace memory ~8× through point-spread-function symmetry and compact
   k-space support, with implementations in BART and Julia.
-- ISMRM 2023 — <https://perso.crans.org/comby/ISMRM2023/ISMRM%202023.html>
+- ISMRM 2023 — <https://perso.crans.org/comby/ISMRM2023/ISMRM%202023.html>.
+  The parity (polyphase) decomposition of the doubled grid, which is the
+  default layout here.
 - **riesling** — <https://github.com/spinicist/riesling>. Wood TC, Ljungberg E,
   Wiesinger F. *Radial Interstices Enable Speedy Low-volume Imaging.* Journal
   of Open Source Software 6(64), 3500 (2021).
