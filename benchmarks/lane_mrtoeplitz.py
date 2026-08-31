@@ -145,9 +145,9 @@ def main() -> None:
     # maps floor at about 5e-3 however large the kernel, that residual being
     # the eigenvector normalisation's edge rather than the sensitivity, so
     # there is nothing to buy above a small one.
-    sensitivities = mt.CoilKernels.from_maps(
-        torch.as_tensor(maps), (16,) * 3
-    ).to(arguments.device)
+    sensitivities = mt.CoilKernels.from_maps(torch.as_tensor(maps), (16,) * 3).to(
+        arguments.device
+    )
 
     def apply():
         return mt.apply_sense(kernel, image, sensitivities, coil_batch_size=1)
