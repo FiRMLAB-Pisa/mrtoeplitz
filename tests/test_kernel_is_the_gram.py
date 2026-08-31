@@ -233,3 +233,33 @@ def test_a_kernel_says_what_it_is(radial):
         text = repr(kernel)
         assert text.startswith(f"{name}ToeplitzKernel(")
         assert "rank=1" in text and "image_shape=(32, 32)" in text
+
+
+def test_compression_costs_a_weighted_transfer_more_than_an_unweighted_one(
+    radial, image, exact_gram, relative_error
+):
+    """Support comes from where the trajectory went, and weights do not move it.
+
+    Weighting by ``|k|`` empties the k-space centre, so relatively more of the
+    transfer's energy sits in the tails compression drops. The compressed
+    weighted kernel is still accurate enough for a solve, but it is a decade
+    or more worse than the uncompressed one, and a caller choosing between
+    them should not have to discover that.
+    """
+    trajectory = radial(n_spokes=96, n_samples=128)
+    x = image()
+    density = np.linalg.norm(trajectory, axis=-1).astype(np.float32)
+    truth = exact_gram(trajectory, (32, 32), x, density=density)
+
+    def error(compress):
+        kernel = mt.scalar_kernel(
+            trajectory,
+            (32, 32),
+            density=density,
+            options=mt.toeplitz_options(compress=compress),
+        )
+        return relative_error(_apply(kernel, x, "cpu"), truth)
+
+    compressed, whole = error(True), error(False)
+    assert whole < 1e-4
+    assert compressed > 4 * whole

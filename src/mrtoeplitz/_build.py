@@ -500,9 +500,15 @@ def _subspace_kernel_from_blocks(
 def _basis_as_rank_by_frames(basis: Any, n_frames: int | None) -> Any:
     """Return the basis as ``(rank, frames)``, whichever way round it came.
 
-    A subspace has fewer components than the dimension it compresses, so where
-    the trajectory does not settle the frame count the longer axis is the
-    frames. A square basis compresses nothing and is read as ``(frames, rank)``.
+    Which axis is which is read off the data. When the trajectory states a
+    frame count, the axis matching it is the frames. When it does not, the
+    longer axis is: a subspace has fewer components than the frames it
+    compresses.
+
+    A square basis satisfies both readings, and is taken as ``(frames, rank)``
+    -- the form the documentation leads with -- whether or not the trajectory
+    stated a count. A basis that compresses nothing is a real case: it is what
+    a full temporal basis looks like before it has been cut to a rank.
     """
     torch = import_module("torch")
     basis = torch.as_tensor(basis)
@@ -511,8 +517,15 @@ def _basis_as_rank_by_frames(basis: Any, n_frames: int | None) -> Any:
             f"basis must be (frames, rank) or (rank, frames), got shape "
             f"{tuple(basis.shape)}"
         )
+    if basis.shape[0] == basis.shape[1]:
+        if n_frames is not None and basis.shape[0] != n_frames:
+            raise ValueError(
+                f"basis {tuple(basis.shape)} has no axis matching the "
+                f"{n_frames} frames the trajectory carries"
+            )
+        return basis.T
     if n_frames is not None:
-        if basis.shape[0] == n_frames and basis.shape[1] != n_frames:
+        if basis.shape[0] == n_frames:
             return basis.T
         if basis.shape[1] == n_frames:
             return basis
@@ -595,9 +608,14 @@ def subspace_kernel(
         is ``+kN/2``, so the same numbers describe the image grid and
         the doubled one the transfer lives on.
     basis
-        ``(frames, rank)`` or ``(rank, frames)``, whichever way round. The
-        frames axis is contrasts for a qMRI scan and time for a dynamic one;
-        nothing here needs to know which.
+        ``(frames, rank)`` or ``(rank, frames)`` -- both are accepted, and
+        which one it is comes from the data rather than from the caller. The
+        axis matching the trajectory's frame count is the frames; where the
+        trajectory states no count, the longer axis is. A square basis reads
+        as ``(frames, rank)``.
+
+        The frames axis is contrasts for a qMRI scan and time for a dynamic
+        one; nothing here needs to know which.
     image_shape
         The image grid. The transfer is built on twice this in every dimension.
     density
@@ -711,7 +729,8 @@ def cartesian_subspace_kernel(
         Sampling masks, ``(frames, *image_shape)`` or ``(1, *image_shape)`` for
         one mask shared by every frame. Centred, the way k-space is written.
     basis
-        ``(frames, rank)`` or ``(rank, frames)``, whichever way round.
+        ``(frames, rank)`` or ``(rank, frames)``; as
+        :func:`subspace_kernel`, the orientation is read off the data.
     options
         As :func:`toeplitz_options`.
     streaming

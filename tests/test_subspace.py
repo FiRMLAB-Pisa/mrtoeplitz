@@ -239,3 +239,52 @@ def test_a_compressed_subspace_kernel_keeps_what_the_trajectory_reached(rotated)
     whole = mt.subspace_kernel(trajectory, basis, shape, options=SINGLE)
     kept = cut.n_locations / whole.n_locations
     assert 0.5 < kept < 1.0
+
+
+def test_either_basis_orientation_gives_the_same_kernel(rotated):
+    """The caller does not have to know which way round the basis is."""
+    trajectory, shape = rotated(n_frames=6)
+    rng = np.random.default_rng(4)
+    basis = rng.normal(size=(6, 2)).astype(np.float32)  # (frames, rank)
+
+    upright = mt.subspace_kernel(trajectory, basis, shape, options=SINGLE)
+    flipped = mt.subspace_kernel(trajectory, basis.T, shape, options=SINGLE)
+    x = torch.as_tensor(
+        (rng.normal(size=(2, *shape)) + 1j * rng.normal(size=(2, *shape))).astype(
+            np.complex64
+        )
+    )[None]
+    reference = upright(x)
+    difference = (reference - flipped(x)).abs().max() / reference.abs().max()
+    assert float(difference) < 1e-6
+
+
+def test_a_square_basis_reads_as_frames_by_rank(rotated):
+    """A basis that compresses nothing is a real case, and it is ambiguous.
+
+    Both readings fit a square basis, so one of them has to be chosen. It is
+    ``(frames, rank)`` -- the form the documentation leads with -- and it has
+    to be the same choice whether or not the trajectory stated a frame count,
+    or a full temporal basis is silently transposed for one caller and not the
+    other.
+    """
+    trajectory, shape = rotated(n_frames=3)
+    rng = np.random.default_rng(5)
+    basis = rng.normal(size=(3, 3)).astype(np.float32)
+
+    per_frame = mt.subspace_kernel(trajectory, basis, shape, options=SINGLE)
+    shared = mt.subspace_kernel(trajectory[0], basis, shape, options=SINGLE)
+    # Transposing the basis by hand must reach the other reading, in both.
+    other = mt.subspace_kernel(trajectory, basis.T, shape, options=SINGLE)
+
+    x = torch.as_tensor(
+        (rng.normal(size=(3, *shape)) + 1j * rng.normal(size=(3, *shape))).astype(
+            np.complex64
+        )
+    )[None]
+    assert per_frame.rank == shared.rank == 3
+    reference = per_frame(x)
+    # The two readings are genuinely different operators, so transposing by
+    # hand has to reach the other one rather than being absorbed.
+    difference = (reference - other(x)).abs().max() / reference.abs().max()
+    assert float(difference) > 1e-3
