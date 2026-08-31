@@ -61,6 +61,51 @@ def _resize_centered(value: Any, shape: tuple[int, ...]) -> Any:
     return result
 
 
+def _smallest_kernel(
+    spectrum: Any,
+    image_shape: tuple[int, ...],
+    tolerance: float,
+) -> tuple[int, ...]:
+    """Smallest centred cube whose truncation error is within ``tolerance``.
+
+    Both transforms are the pair the class expands with, so by Parseval the
+    error a truncation leaves is the square root of the energy it drops. That
+    is read off the spectrum directly, which is why sizing costs one transform
+    rather than one per candidate.
+    """
+    torch = _torch()
+    power = spectrum.abs().square()
+    total = power.sum()
+    if total <= 0:
+        return tuple(2 for _ in image_shape)
+
+    spatial = tuple(range(power.ndim - len(image_shape), power.ndim))
+    largest = max(image_shape)
+
+    def dropped(side: int) -> tuple[tuple[int, ...], float]:
+        shape = tuple(min(side, size) for size in image_shape)
+        kept = power
+        for axis, size in zip(spatial, shape, strict=True):
+            start = (kept.shape[axis] // 2) - size // 2
+            kept = kept.narrow(axis, start, size)
+        return shape, float(torch.sqrt(torch.clamp(1.0 - kept.sum() / total, min=0.0)))
+
+    # The full grid is not a candidate: it is the dense bank under another
+    # name, and answering with it would report a saving of one.
+    best = 1.0
+    for side in range(2, largest, 2):
+        shape, error = dropped(side)
+        best = min(best, error)
+        if error <= tolerance:
+            return shape
+    raise ValueError(
+        f"no kernel smaller than {image_shape} holds these maps to "
+        f"{tolerance:g}; the closest gets to {best:.2e}. A map that is not "
+        f"band-limited cannot be truncated -- keep the calibration kernels "
+        f"and never form it."
+    )
+
+
 class CoilKernels:
     """Coil sensitivities stored as truncated centred k-space kernels.
 
@@ -142,7 +187,10 @@ class CoilKernels:
     def from_maps(
         cls,
         maps: Any,
-        kernel_shape: tuple[int, ...],
+        kernel_shape: tuple[int, ...] | None = None,
+        *,
+        tolerance: float | None = None,
+        spatial_ndim: int | None = None,
     ) -> CoilKernels:
         """Truncate a dense map bank to its central k-space kernels.
 
@@ -155,7 +203,8 @@ class CoilKernels:
         kernels and never form the map.
 
         :meth:`truncation_error` says which case you are in, so this does not
-        have to be taken on trust.
+        have to be taken on trust -- and ``tolerance`` does not require you to
+        ask, because it sizes the kernel by that same measurement.
 
         Parameters
         ----------
@@ -163,12 +212,28 @@ class CoilKernels:
             Dense sensitivities, ``(coils, *image_shape)`` or with a leading
             batch axis.
         kernel_shape
-            Sides of the kernel to keep, centred on k-space DC.
+            Sides of the kernel to keep, centred on k-space DC. Give this or
+            ``tolerance``, not both.
+        tolerance
+            Size the kernel instead: the smallest cube whose truncation error
+            is at or below this. The error is read off the spectrum by
+            Parseval rather than by expanding a candidate, so this costs one
+            transform however many sizes it considers.
+        spatial_ndim
+            How many trailing axes are the image, when ``tolerance`` is used.
+            ``None`` treats every axis after the first as spatial.
 
         Returns
         -------
         CoilKernels
             The truncated bank.
+
+        Raises
+        ------
+        ValueError
+            If neither or both of ``kernel_shape`` and ``tolerance`` are
+            given, or if no kernel short of the full grid meets the tolerance
+            -- which is what a map that is not band-limited looks like.
 
         Examples
         --------
@@ -177,14 +242,30 @@ class CoilKernels:
         >>> maps = torch.ones(4, 32, 32, dtype=torch.complex64)
         >>> mt.CoilKernels.from_maps(maps, (8, 8)).kernel_shape
         (8, 8)
+
+        Sized by measurement instead. A constant map is one k-space cell, so
+        the smallest kernel that carries it is the smallest there is:
+
+        >>> mt.CoilKernels.from_maps(maps, tolerance=1e-6).kernel_shape
+        (2, 2)
         """
         torch = _torch()
         maps = torch.as_tensor(maps)
         if not maps.is_complex():
             maps = maps.to(torch.complex64)
-        kernel_shape = tuple(int(size) for size in kernel_shape)
-        image_shape = tuple(int(size) for size in maps.shape[-len(kernel_shape) :])
-        spectrum = cls._forward(maps, len(kernel_shape))
+        if (kernel_shape is None) == (tolerance is None):
+            raise ValueError("give from_maps a kernel_shape or a tolerance, not both")
+
+        if kernel_shape is not None:
+            kernel_shape = tuple(int(size) for size in kernel_shape)
+            image_shape = tuple(int(size) for size in maps.shape[-len(kernel_shape) :])
+            spectrum = cls._forward(maps, len(kernel_shape))
+            return cls(_resize_centered(spectrum, kernel_shape), image_shape)
+
+        ndim = maps.ndim - 1 if spatial_ndim is None else int(spatial_ndim)
+        image_shape = tuple(int(size) for size in maps.shape[-ndim:])
+        spectrum = cls._forward(maps, ndim)
+        kernel_shape = _smallest_kernel(spectrum, image_shape, float(tolerance))
         return cls(_resize_centered(spectrum, kernel_shape), image_shape)
 
     @staticmethod

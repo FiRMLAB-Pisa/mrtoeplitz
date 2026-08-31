@@ -100,18 +100,20 @@ kernel = mt.cartesian_subspace_kernel(masks, basis)
 normal = mt.apply_sense(kernel, image, maps)
 ```
 
-For arrays too large to hold as maps, pass k-space kernels instead. They stand
-in for the dense bank — shape, rank and coil slicing all answer as the tensor
-would — and only the coils asked for are expanded. At 320³ with 48 channels
-that is 12.6 GB of maps against 1.5 MB of kernels.
+For arrays too large to hold as maps, pass k-space kernels instead — the
+largest saving here, since a bank is gigabytes where a transfer is megabytes.
+They stand in for the dense bank — shape, rank and coil slicing all answer as
+the tensor would — and only the coils asked for are expanded.
 
 ```python
-kernels = mt.CoilKernels.from_maps(maps, kernel_shape=(16, 16, 16))
+kernels = mt.CoilKernels.from_maps(maps, tolerance=1e-3)
 normal = mt.apply_sense(kernel, image, kernels)
 ```
 
-Sound when the maps are band-limited; `truncation_error` says whether yours
-are.
+Sound only for band-limited maps, so the size is measured rather than guessed:
+`tolerance` picks the smallest kernel that holds the bank to it, and refuses
+a bank that has none. On NLINV maps that is 114× smaller; ESPIRiT's manage 2×,
+and a simulated array is refused.
 
 ![sensitivities as k-space kernels](examples/figures/coil_kernels.png)
 

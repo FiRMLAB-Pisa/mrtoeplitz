@@ -159,3 +159,53 @@ def test_a_sense_normal_reads_kernels_as_it_reads_a_dense_bank(
     error = torch.linalg.vector_norm(compact - dense) / torch.linalg.vector_norm(dense)
     assert float(error) < 1e-4
     assert np.isfinite(float(torch.linalg.vector_norm(compact)))
+
+
+def _band_limited(coils=4, side=10, grid=64, seed=0):
+    """A bank that is band-limited by construction, as an NLINV map is."""
+    rng = np.random.default_rng(seed)
+    seed_kernels = torch.as_tensor(
+        rng.normal(size=(coils, side, side))
+        + 1j * rng.normal(size=(coils, side, side))
+    ).to(torch.complex64)
+    return mt.CoilKernels(seed_kernels, (grid, grid)).materialize()
+
+
+def test_a_tolerance_sizes_the_kernel_and_is_met():
+    """Sizing is by Parseval on the spectrum, so it has to hold when expanded."""
+    maps = _band_limited()
+    for tolerance in (1e-2, 1e-4, 1e-6):
+        kernels = mt.CoilKernels.from_maps(maps, tolerance=tolerance)
+        assert kernels.truncation_error(maps) <= tolerance
+
+
+def test_a_tolerance_picks_a_smaller_kernel_than_a_looser_one_would():
+    maps = _band_limited()
+    loose = mt.CoilKernels.from_maps(maps, tolerance=1e-2)
+    tight = mt.CoilKernels.from_maps(maps, tolerance=1e-8)
+    assert loose.kernel_shape <= tight.kernel_shape
+    assert loose.compression_ratio >= tight.compression_ratio
+
+
+def test_maps_that_are_not_band_limited_are_refused_rather_than_truncated():
+    """The one case where the saving is not worth a couple of decimal digits.
+
+    A hard edge in the image has broad k-space support, so there is no kernel
+    short of the whole grid, and answering with the whole grid would report a
+    saving that is not one.
+    """
+    grid = 64
+    y, x = torch.meshgrid(
+        torch.linspace(-1, 1, grid), torch.linspace(-1, 1, grid), indexing="ij"
+    )
+    masked = (_band_limited(grid=grid) * ((x**2 + y**2) < 0.6**2)).to(torch.complex64)
+    with pytest.raises(ValueError, match="not band-limited"):
+        mt.CoilKernels.from_maps(masked, tolerance=1e-4)
+
+
+def test_from_maps_wants_a_shape_or_a_tolerance_and_not_both():
+    maps = _band_limited()
+    with pytest.raises(ValueError, match="not both"):
+        mt.CoilKernels.from_maps(maps)
+    with pytest.raises(ValueError, match="not both"):
+        mt.CoilKernels.from_maps(maps, (8, 8), tolerance=1e-3)
