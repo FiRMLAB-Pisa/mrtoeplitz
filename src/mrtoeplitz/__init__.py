@@ -26,6 +26,7 @@ from ._build import (
     subspace_kernel,
     toeplitz_options,
 )
+from ._coils import CoilKernels
 from ._kernel import (
     CompactToeplitzKernel,
     PolyphaseToeplitzKernel,
@@ -43,6 +44,7 @@ except PackageNotFoundError:  # a source tree that was never installed
     __version__ = "0.0.0.dev0"
 
 __all__ = [
+    "CoilKernels",
     "CompactToeplitzKernel",
     "PolyphaseToeplitzKernel",
     "__version__",

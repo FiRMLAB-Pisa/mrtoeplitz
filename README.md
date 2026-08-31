@@ -75,6 +75,59 @@ sampling mask itself:
 kernel = mt.cartesian_subspace_kernel(masks, basis)
 ```
 
+## Coil sensitivities as k-space kernels
+
+A SENSE normal reads one coil at a time and never needs the whole bank, but
+the bank is what gets stored: 48 channels at 320³ in complex single precision
+is 12.6 GB. `CoilKernels` holds the centred k-space kernels instead and
+expands one coil when the apply asks for it, so what is in flight is a single
+map — which the apply already held.
+
+```python
+kernels = mt.CoilKernels.from_maps(maps, kernel_shape=(16, 16, 16))
+kernels.compression_ratio  # 8000x for 320**3 -> 16**3
+```
+
+It stands in for the dense bank — `shape`, `ndim`, `dtype`, `device` and
+leading-axis slicing all answer as the tensor would — so nothing in the apply
+changes. Pass it where sensitivities go, on a holder with `shape` and `smaps`
+(MRI-NUFFT's own operator validates that attribute as a NumPy array, so a
+kernel bank travels beside it rather than through it).
+
+### What it costs, measured
+
+The representation is **exact for a band-limited map**: expand a random 12²
+kernel to 64², truncate it back, and you recover the kernels to 1.0e-07 with a
+round-trip error of 1.6e-07.
+
+It is **not exact for a map that was formed first**. A real surface-coil
+sensitivity does not vanish at the edge of the field of view, so under the
+periodic transform it wraps, its spectrum falls off like one over frequency,
+and truncation rings. Measured on a Biot-Savart four-loop array at 64²:
+
+| kernel | whole FOV | inside r<0.3 | compression |
+|---|---|---|---|
+| 8² | 9.4e-02 | 5.4e-02 | 64× |
+| 12² | 6.4e-02 | 3.5e-02 | 28× |
+| 16² | 4.8e-02 | 2.6e-02 | 16× |
+| 24² | 3.3e-02 | 1.8e-02 | 7× |
+
+Staying inside the object only buys a factor of about 1.8 — the ringing
+reaches it. Two ways to be in the exact case instead:
+
+- **Take the kernels from the calibration and never form the map.** NLINV's
+  maps are band-limited by construction — the Sobolev weighting *is* a band
+  limit, and BART already stores them as k-space coefficients. For ESPIRiT,
+  keep the calibration kernels and skip the eigenvector normalisation: the
+  `|m| = 1` mask puts a hard edge in the image, which is the worst case in the
+  table above.
+- **Bring the map to zero at the boundary first.** The same Biot-Savart bank
+  under a Hann taper truncates to 7.9e-04 at 16² — two orders better, because
+  the error was the wrap and not the coil geometry.
+
+`truncation_error(maps)` reports which case you are in, so none of this has to
+be taken on trust.
+
 ## What the options actually change
 
 Nothing decides how the kernel is *built*. It is gridded onto the doubled grid

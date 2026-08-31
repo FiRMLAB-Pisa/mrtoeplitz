@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from ._backend import _base_fourier_operator
+from ._coils import CoilKernels
 from ._kernel import CompactToeplitzKernel, _device_is_full, as_torch
 
 
@@ -34,6 +35,10 @@ def _sense_maps(native_operator: Any, reference: Any) -> Any:
             dtype=reference.dtype,
             device=reference.device,
         )
+    if isinstance(maps, CoilKernels):
+        # Already answers shape, ndim and coil slicing as the dense bank would,
+        # and materialising it here to check that would be the whole point lost.
+        return maps
     maps = as_torch(maps).to(reference.dtype)
     spatial_ndim = len(base.shape)
     if maps.ndim == spatial_ndim:
