@@ -55,34 +55,32 @@ better property of the two. On CPU it is **1.66x** cheaper outright.
 Deli-CS, 500 frames x 8 shots x 1688 points, 48 channels compressed to 8,
 rank 4, 256³, in low-memory mode. RTX 4060 Laptop, 8 GiB.
 
-### CUDA, 192³ — where there is room
+### CUDA
 
-| | RAM | VRAM | `A^H y` | create | apply |
-|---|---|---|---|---|---|
-| floor | 644 MiB | 1409 MiB | — | — | 1019 ms |
-| mrtoeplitz | 5748 MiB | 7117 MiB | 7406 ms | 10137 ms | **2365 ms** |
+| size | | VRAM | `A^H y` | create | apply | vs floor |
+|---|---|---|---|---|---|---|
+| 192³ | floor | 1409 MiB | — | — | 1019 ms | |
+| 192³ | mrtoeplitz | 4618 MiB | 6240 ms | 7347 ms | **2371 ms** | **2.33x** |
+| 256³ | floor | 3185 MiB | — | — | 2103 ms | |
+| 256³ | mrtoeplitz | 7925 MiB | 13971 ms | 19097 ms | **5609 ms** | **2.67x** |
 
-**2.32x the floor**, and it replicates: two runs gave 2365.1 and 2365.7 ms.
+The apply replicates at both sizes: 2365.1 and 2365.7 ms at 192³, and 5609.2,
+5621.0 and 5608.9 ms at 256³. The build does not, ranging 19 to 40 seconds at
+256³ across the same three runs; it is paid once and amortised over a solve,
+but no single figure for it is quoted.
 
-VRAM here is peak *occupancy*, not the live set. The transfer is about 1.2 GiB
-and a coefficient volume 227 MiB, so most of the 7117 MiB is Torch's caching
-allocator having grown during the build and not returned it. Occupancy is
-still what decides whether anything else fits on the card, which is why it is
-the number reported, but it is not what the operator holds.
+That 256³ column only became measurable when the gridding moved to a 1.25
+working grid. Before it, the same work ranged 5143 to 55828 ms across runs
+differing only in where the transfer was built and whether it was streamed:
+CUFINUFFT's default upsampling put 3962 MiB in its own working grid, the card
+had nothing left to give, and what the apply measured was how much room it
+found. At 1.25 the plan is 1338 MiB and the spread is gone.
 
-### CUDA, 256³ — where there is not
-
-| | VRAM | apply |
-|---|---|---|
-| floor | 3185 MiB | 2103–2149 ms |
-| mrtoeplitz | 7759–7894 MiB | **5143–55828 ms** |
-
-**No ratio is quoted.** Across runs differing only in where the transfer was
-built and whether it was streamed, the apply measured 5143, 17992, 27377,
-27949 and 55828 ms, and `A^H y` 11345 to 40076 ms. The transfer alone is
-2.84 GiB and the floor needs 3.19 GiB of an 8188 MiB card. What varies is how
-much room the apply finds, not what it computes -- which is the finding, and
-the reason 192³ is the size reported above.
+VRAM here is peak *occupancy*, not the live set. Most of what is above the
+transfer and the volumes is Torch's caching allocator holding what the build
+grew, which it returns when asked, and a workspace CUFINUFFT keeps for the
+life of the process -- one-time, identical across four repeated builds, and
+not reclaimed by destroying the plan.
 
 ### CPU
 
