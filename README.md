@@ -11,32 +11,24 @@ CUDA.
 `AᴴA` for a non-Cartesian encoding is a convolution, so it can be applied as a
 pointwise multiply between two FFTs rather than a forward and adjoint NUFFT.
 The cost is memory: the transfer lives on a grid twice the image in every
-dimension, which for a high-resolution subspace reconstruction is the whole
-card. BART and MRFingerprintingRecon.jl reduce that with point-spread-function
-symmetry and compact k-space support; this package implements those and adds
-the memory and runtime work on top.
+dimension. This package spends accuracy digits to buy that memory back, and
+gets as close to the two-FFT floor as it can.
 
-**From the reference implementations:** the gridded construction, support
-compression (BART's `--compress-psf`), and the parity decomposition of the
-doubled grid — on by default here, so the convolution always runs on the image
-grid and the doubled one is never materialised.
+**From the reference implementations** (BART, MRFingerprintingRecon.jl): the
+gridded construction, support compression, and the parity decomposition of the
+doubled grid — on by default here, so the doubled grid is never materialised.
 
 **Added here:**
 
-- **bfloat16 transfers** on natively capable devices, halving what the card
-  holds and what crosses the bus, for about two decimal digits
+- **bfloat16 transfers**, halving what the card holds and what crosses the bus
 - **Dual-stream host staging** — a transfer larger than the card stays in
   pinned host memory and arrives in chunks, the copy of one overlapping the
   multiply of the one before
-- **Fused apply lanes** — Triton on CUDA, runtime-dispatched AVX2/AVX512 on
-  CPU, over the packed Hermitian coefficient field
-- **Coil sensitivities as k-space kernels**, riesling's low-memory idea, with
-  only the coils asked for expanded
+- **Fused apply lanes** — Triton on CUDA, runtime-dispatched AVX2/AVX512 on CPU
+- **Coil sensitivities as k-space kernels**, riesling's low-memory idea
 - **Differentiable**: the operator is Hermitian, so backward is one more
-  application and keeps nothing — which matters because the lanes that make a
-  large transfer fit cannot be traced at all
-- Multi-GPU coil splitting, one gridding plan per build, and reused transform
-  banks
+  application and keeps nothing
+- Multi-GPU coil splitting, one gridding plan per build, reused transform banks
 
 Scalar, subspace and Cartesian-subspace transfers, on CPU and CUDA. FINUFFT
 and CUFINUFFT are called directly, so a CUDA build never leaves Torch. Applying
@@ -107,24 +99,16 @@ normal = mt.apply_sense(kernel, image, maps)
 
 For arrays too large to hold as maps, pass k-space kernels instead. They stand
 in for the dense bank — shape, rank and coil slicing all answer as the tensor
-would — and only the coils asked for are expanded.
+would — and only the coils asked for are expanded. At 320³ with 48 channels
+that is 12.6 GB of maps against 1.5 MB of kernels.
 
 ```python
 kernels = mt.CoilKernels.from_maps(maps, kernel_shape=(16, 16, 16))
 normal = mt.apply_sense(kernel, image, kernels)
 ```
 
-Sound exactly when the maps are band-limited, which is a measurement rather
-than an assumption. Against three banks from BART, at a 16-cell kernel:
-
-| maps | `truncation_error` |
-|---|---|
-| `bart nlinv` — Sobolev weighting *is* a band limit | **1.6e-07** |
-| `bart ecalib` — the `\|m\| = 1` normalisation puts an edge in the image | 1.1e-01 |
-| `bart coils` — a simulated array's field decays as a power law | 1.6e-01 |
-
-So this pairs with NLINV, whose maps BART already stores as k-space
-coefficients. For ESPIRiT, keep the calibration kernels and never form the map.
+Sound when the maps are band-limited; `truncation_error` says whether yours
+are.
 
 ![sensitivities as k-space kernels](examples/figures/coil_kernels.png)
 
