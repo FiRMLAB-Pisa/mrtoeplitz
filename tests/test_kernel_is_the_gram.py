@@ -19,12 +19,18 @@ def _apply(kernel, x, device):
     return np.asarray(kernel.to(device)(tensor).detach().cpu()).reshape(x.shape)
 
 
+#: These pin the gridding as well as switching compression off. With nothing
+#: thrown away afterwards there is no margin for a loose transform to hide in,
+#: which is the opposite of the default's situation.
+#:
 #: What a kernel agrees with the exact Gram to, in single precision. The CUDA
 #: default is bfloat16, which is two decimal digits coarser -- see
 #: ``test_the_cuda_transfer_defaults_to_bfloat16_on_a_capable_device``. Every
 #: check of *what operator is computed* pins float32 so the two devices are
 #: held to one number.
-SINGLE = mt.toeplitz_options(compress=False, cuda_transfer_precision="float32")
+SINGLE = mt.toeplitz_options(
+    compress=False, cuda_transfer_precision="float32", gridding_tolerance=1e-4
+)
 
 
 def test_the_scalar_kernel_reproduces_the_exact_gram(
@@ -256,7 +262,7 @@ def test_compression_costs_a_weighted_transfer_more_than_an_unweighted_one(
             trajectory,
             (32, 32),
             density=density,
-            options=mt.toeplitz_options(compress=compress),
+            options=mt.toeplitz_options(compress=compress, gridding_tolerance=1e-4),
         )
         return relative_error(_apply(kernel, x, "cpu"), truth)
 

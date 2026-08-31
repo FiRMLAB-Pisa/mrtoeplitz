@@ -10,7 +10,7 @@ import torch
 
 import mrtoeplitz as mt
 
-WHOLE = mt.toeplitz_options(compress=False)
+WHOLE = mt.toeplitz_options(compress=False, gridding_tolerance=1e-4)
 cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA device")
 
 

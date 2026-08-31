@@ -18,23 +18,23 @@ __all__ = ["PsfPlan", "psf_plan", "psf_plans", "within_psf_plans"]
 from contextlib import contextmanager, suppress
 from functools import wraps
 from importlib import import_module
-from math import prod
 from typing import Any
 
-#: The transfer is held as complex64 and then cut to the support the scan
-#: reached, so gridding it tighter than this buys nothing that survives either
-#: step and costs several times the build.
-_TOLERANCE = 1e-4
+#: A NUFFT spreads onto a grid of its own on the way to the one it answers on,
+#: and how much larger that grid is decides what a plan costs. On the doubled
+#: grid the default factor of two is the largest allocation a build makes --
+#: measured at 3962 MiB for a 384-cubed transfer -- where 1.25 is 1338 MiB for
+#: the same tolerance, the same accuracy, and slightly less time: the smaller
+#: working grid saves more than the wider interpolation kernel costs. Nothing
+#: below 1.25 is available; CUFINUFFT refuses to plan at 1.125.
+_UPSAMPLING = 1.25
 
-#: A NUFFT spreads onto a grid of its own on the way to the one it answers on.
-#: That grid is internal and does not touch the transfer, so it is chosen for
-#: what it costs: on a doubled grid the wide one is eight times the transfer,
-#: and where that stops fitting the narrow one is asked for a looser tolerance
-#: instead -- which keeps its interpolation kernel the width the wide one has,
-#: and spends the difference on the transfer rather than on every point spread
-#: onto it.
-_NARROW_TOLERANCE = 1e-3
-_NARROW_UPSAMPLING = 1.25
+#: The transfer is held as complex64, cut to the support the scan reached and
+#: encoded in bfloat16 on the device, so gridding it tighter than this buys
+#: nothing that survives any of those. Measured on a 384-cubed transfer, the
+#: gridding leaves 3.95e-04 where compression leaves 1.15e-02, and going to
+#: 1e-4 costs 2.5x the build for an error the compression swamps.
+_TOLERANCE = 1e-3
 
 #: One slot. A plan on the doubled grid is the largest allocation a build
 #: makes -- larger than the kernel it produces -- and holding a second is what
@@ -71,18 +71,12 @@ def _yield_cached_device_memory(device: Any) -> None:
         torch.cuda.empty_cache()
 
 
-def _plan_options(spatial_shape: tuple[int, ...], samples: Any) -> dict[str, Any]:
-    """Return the tolerance and spreading grid to plan with, for the room there is."""
-    torch = import_module("torch")
-    device = getattr(samples, "device", None)
-    if "cuda" not in str(device):
-        return {"eps": _TOLERANCE}
-    free, _ = torch.cuda.mem_get_info(device)
-    spreading = 8 * (2 ** len(spatial_shape)) * prod(spatial_shape)
-    wide = spreading + 8 * prod(spatial_shape) + 8 * int(samples.shape[0])
-    if wide < 0.6 * free:
-        return {"eps": _TOLERANCE}
-    return {"eps": _NARROW_TOLERANCE, "upsampfac": _NARROW_UPSAMPLING}
+def _plan_options(tolerance: float | None) -> dict[str, Any]:
+    """Return the tolerance and spreading grid to plan with."""
+    return {
+        "eps": _TOLERANCE if tolerance is None else float(tolerance),
+        "upsampfac": _UPSAMPLING,
+    }
 
 
 class PsfPlan:
@@ -101,7 +95,12 @@ class PsfPlan:
         decides whether the transform runs on the host or on a device.
     """
 
-    def __init__(self, spatial_shape: tuple[int, ...], samples: Any) -> None:
+    def __init__(
+        self,
+        spatial_shape: tuple[int, ...],
+        samples: Any,
+        tolerance: float | None = None,
+    ) -> None:
         torch = import_module("torch")
         self.spatial_shape = tuple(int(size) for size in spatial_shape)
         self.device = samples.device
@@ -118,7 +117,7 @@ class PsfPlan:
             # sign on the locations it keeps, and that assumes k-space centre
             # sits in the middle of what comes back.
             modeord=0,
-            **_plan_options(self.spatial_shape, samples),
+            **_plan_options(tolerance),
         )
         self._out = (
             torch.empty(self.spatial_shape, dtype=torch.complex64, device=self.device)
@@ -161,16 +160,25 @@ class PsfPlan:
         return torch.from_numpy(gridded).to(torch.complex64)
 
 
-def psf_plan(spatial_shape: tuple[int, ...], samples: Any) -> PsfPlan:
+def psf_plan(
+    spatial_shape: tuple[int, ...],
+    samples: Any,
+    tolerance: float | None = None,
+) -> PsfPlan:
     """Return the build's gridding plan, retargeted at ``samples``."""
     shape = tuple(int(size) for size in spatial_shape)
-    key = (str(samples.device).split(":")[0], shape, int(samples.shape[0]))
+    key = (
+        str(samples.device).split(":")[0],
+        shape,
+        int(samples.shape[0]),
+        tolerance,
+    )
     held = _PLAN_SLOT.get(key)
     if held is not None:
         held.setpts(samples)
         return held
     _PLAN_SLOT.clear()
-    plan = PsfPlan(shape, samples)
+    plan = PsfPlan(shape, samples, tolerance)
     _PLAN_SLOT[key] = plan
     return plan
 

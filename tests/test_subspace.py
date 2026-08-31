@@ -6,7 +6,9 @@ import torch
 
 import mrtoeplitz as mt
 
-SINGLE = mt.toeplitz_options(compress=False, cuda_transfer_precision="float32")
+SINGLE = mt.toeplitz_options(
+    compress=False, cuda_transfer_precision="float32", gridding_tolerance=1e-4
+)
 
 
 @pytest.fixture

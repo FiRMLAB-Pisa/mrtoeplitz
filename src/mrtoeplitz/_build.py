@@ -76,6 +76,7 @@ def _compute_toeplitz_transfer(
     samples: Any,
     image_shape: tuple[int, ...],
     weights: Any | None = None,
+    tolerance: float | None = None,
 ) -> Any:
     """Return the transfer a Toeplitz normal operator multiplies by.
 
@@ -94,7 +95,7 @@ def _compute_toeplitz_transfer(
     torch = import_module("torch")
     samples = as_torch(samples)
     spatial_shape = tuple(2 * size for size in image_shape)
-    plan = psf_plan(spatial_shape, samples)
+    plan = psf_plan(spatial_shape, samples, tolerance)
 
     if weights is None:
         values = torch.ones(
@@ -301,7 +302,9 @@ def scalar_kernel(
     spatial_shape = tuple(2 * size for size in image_shape)
 
     transfer = as_torch(
-        _compute_toeplitz_transfer(samples, image_shape, weights)
+        _compute_toeplitz_transfer(
+            samples, image_shape, weights, options["gridding_tolerance"]
+        )
     ).flatten()
     indices = _support_locations(
         samples,
@@ -350,6 +353,7 @@ def _subspace_pair_transfers(
     *,
     streaming: Any | None = None,
     keep_complex: bool = True,
+    tolerance: float | None = None,
 ) -> tuple[Any, float]:
     """Grid one transfer per upper-triangular basis pair, over every sample.
 
@@ -383,7 +387,7 @@ def _subspace_pair_transfers(
     repeats = torch.tensor(counts, device=samples.device)
     coefficients = torch.stack([block[2] for block in blocks], dim=1)
 
-    plan = psf_plan(spatial_shape, samples)
+    plan = psf_plan(spatial_shape, samples, tolerance)
     axes = tuple(range(len(spatial_shape)))
     signs = _centring_signs(indices, spatial_shape)
     # The transform is raw, and the convolution runs on the doubled grid,
@@ -479,6 +483,7 @@ def _subspace_kernel_from_blocks(
         indices,
         streaming=streaming,
         keep_complex=bool(coefficients.is_complex()),
+        tolerance=options["gridding_tolerance"],
     )
     values = (
         packed.to(coefficients.dtype)

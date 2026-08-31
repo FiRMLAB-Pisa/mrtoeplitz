@@ -50,7 +50,12 @@ def adjoint(acquisition, maps, shape, device):
         columns = [np.ascontiguousarray(samples[:, axis]) for axis in range(3)]
     out = np.zeros((basis.shape[1], *shape), dtype=np.complex64)
 
-    plan = module.Plan(1, shape, isign=1, eps=1e-4, dtype="complex64")
+    # The same gridding the transfer is built with: a looser tolerance on the
+    # smaller working grid, which is 2.5x faster for an error an order of
+    # magnitude under what compression leaves.
+    plan = module.Plan(
+        1, shape, isign=1, eps=1e-3, dtype="complex64", upsampfac=1.25
+    )
     plan.setpts(*columns)
     for coefficient in range(basis.shape[1]):
         # Project onto the basis first: one transform per coefficient rather

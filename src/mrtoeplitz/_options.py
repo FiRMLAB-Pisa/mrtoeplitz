@@ -18,6 +18,7 @@ def _toeplitz_options(
     cuda_mode: str = "compact",
     cuda_max_device_fraction: float = 0.85,
     cuda_transfer_precision: str = "auto",
+    gridding_tolerance: float | None = None,
 ) -> dict[str, Any]:
     """Validate how a Toeplitz kernel is applied.
 
@@ -45,6 +46,13 @@ def _toeplitz_options(
     whenever they fit. Compact is the default because memory is the scarce
     thing this package exists to save, on a large card as much as a small one.
 
+    ``gridding_tolerance`` is what the transfer is gridded to. The default is
+    loose on purpose: the transfer is then cut to the support the scan reached
+    and encoded in bfloat16 on the device, and what those leave is an order of
+    magnitude larger than what the gridding does. A build that keeps the whole
+    transfer -- ``compress=False`` -- has no such margin and should ask for a
+    tighter one.
+
     ``polyphase`` files the transfer as one component per parity of the
     doubled grid's coordinates, so the convolution runs on the image grid and
     the doubled one is never materialised. It is the same operator either way,
@@ -55,6 +63,8 @@ def _toeplitz_options(
     which is what ``False`` buys back. ``"auto"`` keeps the doubled grid until
     its banks no longer fit the device budget.
     """
+    if gridding_tolerance is not None and not 0.0 < gridding_tolerance < 1.0:
+        raise ValueError("Toeplitz gridding_tolerance must be in (0, 1)")
     if chunk_size <= 0:
         raise ValueError("Toeplitz chunk_size must be positive")
     if coil_batch_size <= 0:
@@ -77,6 +87,7 @@ def _toeplitz_options(
         "cuda_mode": cuda_mode,
         "cuda_max_device_fraction": float(cuda_max_device_fraction),
         "cuda_transfer_precision": cuda_transfer_precision,
+        "gridding_tolerance": gridding_tolerance,
     }
 
 
