@@ -189,10 +189,9 @@ def main() -> None:
     extra = {"transfer_bytes": float(kernel.storage_nbytes)}
 
     # The trajectory and the density built the transfer and are not read
-    # again; on this grid they are more than a gigabyte of the card, and an
-    # apply that has to work around them runs half as fast again. Building on
-    # the device also leaves the gridding plan's blocks in the caching
-    # allocator, which Torch will not give back on its own.
+    # again, and on this grid they are more than a gigabyte of the card.
+    # Building on the device also leaves the gridding plan's blocks in the
+    # caching allocator, which Torch will not give back on its own.
     del trajectory, density
     if arguments.device == "cuda":
         torch.cuda.empty_cache()
