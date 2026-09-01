@@ -38,10 +38,10 @@ devices:
 
 | | one unit | x 32 volumes |
 |---|---|---|
-| CUDA, padded 512³ | 83 ms | 2657 ms |
-| CUDA, parity 8x256³ | **75 ms** | **2407 ms** |
-| CPU, padded 512³ | 1208 ms | 38647 ms |
-| CPU, parity 8x256³ | **720 ms** | **23031 ms** |
+| CUDA, padded 512³ | 82 ms | 2636 ms |
+| CUDA, parity 8x256³ | **75 ms** | **2410 ms** |
+| CPU, padded 512³ | 1633 ms | 52241 ms |
+| CPU, parity 8x256³ | **826 ms** | **26437 ms** |
 
 ## Results
 
@@ -51,14 +51,23 @@ Laptop, 8 GiB.
 
 | | RAM | VRAM | `A^H y` | create | apply | vs floor |
 |---|---|---|---|---|---|---|
-| CUDA, floor | 643 MiB | 3185 MiB | — | — | 2407 ms | |
-| CUDA, mrtoeplitz | 15077 MiB | 7847 MiB | 15383 ms | 95382 ms | **6931 ms** | **2.88x** |
-| CPU, floor | 3576 MiB | — | — | — | 23031 ms | |
-| CPU, mrtoeplitz | 18106 MiB | — | 51974 ms | 99695 ms | **58432 ms** | **2.54x** |
+| CUDA, floor | 692 MiB | 3185 MiB | — | — | 2410 ms | |
+| CUDA, mrtoeplitz | 15074 MiB | 7913 MiB | 14521 ms | 31610 ms | **6898 ms** | **2.86x** |
+| CPU, floor | 3577 MiB | — | — | — | 26437 ms | |
+| CPU, mrtoeplitz | 18068 MiB | — | 52805 ms | 89131 ms | **61131 ms** | **2.31x** |
 
 The transfer is 3.09 GiB and never resident: it is built onto the host and
 streamed for every application, which is what keeps the device figure below
 what the card holds.
+
+The build's own working set is 3.9 GiB of Torch allocations, which matters
+because the card is 8 GiB and cufinufft's plan takes about 2 GiB more outside
+Torch's accounting. It was 8.35 GiB until the index arithmetic around the
+transfer was walked in pieces and held in the narrowest types that carry it --
+the coordinates a support location decodes to are int64 and there is one per
+axis, which is several times the transfer they describe. Over the card the
+WSL2 driver does not fail: it satisfies the overflow from host memory, and one
+512³ FFT goes from 0.09 s to 7.3 s while nothing reports an error.
 
 Runtimes on this machine are not reproducible to better than about a factor of
 two for the build -- the same build has measured 16 to 45 seconds at a smaller

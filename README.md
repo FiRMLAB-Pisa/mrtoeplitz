@@ -102,16 +102,16 @@ both devices, agreeing to `4e-4`, which is what the gridding tolerance allows.
 
 | | RAM | VRAM | `A^H y` | kernel creation | kernel apply |
 |---|---|---|---|---|---|
-| CPU | 17.7 GiB | — | 52.0 s | 99.7 s | 58.4 s |
-| CUDA | 14.7 GiB | 7.7 GiB | 15.4 s | 95.4 s | 6.9 s |
-| FFT floor, CUDA | 0.6 GiB | 3.1 GiB | — | — | 2.4 s |
-| FFT floor, CPU | 3.5 GiB | — | — | — | 23.0 s |
+| CPU | 17.6 GiB | — | 52.8 s | 89.1 s | 61.1 s |
+| CUDA | 14.7 GiB | 7.7 GiB | 14.5 s | 31.6 s | 6.9 s |
+| FFT floor, CUDA | 0.7 GiB | 3.1 GiB | — | — | 2.4 s |
+| FFT floor, CPU | 3.5 GiB | — | — | — | 26.4 s |
 
 The floor is what the transforms alone cost: `coils x rank` volumes, one
 forward and one inverse each, with the transfer multiply, the sensitivities
 and every copy taken as free. Nothing can beat it, and the apply here is 2.9x
-of it on the device and 2.5x on the host. The transfer is never resident: it is
-2.9 GiB, and it stays on the host and streams.
+of it on the device and 2.3x on the host. The transfer is never resident: it is
+3.1 GiB, and it stays on the host and streams.
 
 Regenerate with `python benchmarks/run.py` and `python benchmarks/figure.py`;
 see [`benchmarks/`](benchmarks/) for what each lane does. Runtimes are from one

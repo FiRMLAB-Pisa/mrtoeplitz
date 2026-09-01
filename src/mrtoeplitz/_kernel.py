@@ -310,6 +310,12 @@ def significant_indices(transfer: Any, tolerance: float) -> Any:
     return torch.nonzero(keep, as_tuple=False).flatten().to(torch.int32)
 
 
+#: How many support locations are decoded at once when their coordinates are
+#: needed. Small enough that the int64 coordinates are nothing beside the
+#: transfer they index.
+_DECODE_CHUNK = 1 << 24
+
+
 def occupancy_indices(
     samples: Any,
     spatial_shape: tuple[int, ...],
@@ -390,19 +396,29 @@ def polyphase_components(
     """
     torch = _torch()
     ndim = len(spatial_shape)
-    flat = as_torch(indices).to(torch.int64)
-    coordinates = []
-    rest = flat
-    for size in reversed(spatial_shape):
-        coordinates.append(rest % size)
-        rest = rest // size
-    coordinates.reverse()
-
-    position = coordinates[0] // 2
-    identity = coordinates[0] % 2
-    for axis in range(1, ndim):
-        position = position * image_shape[axis] + coordinates[axis] // 2
-        identity = identity * 2 + coordinates[axis] % 2
+    flat = as_torch(indices)
+    # Where each location sits on the image grid, and which parity it is.
+    # Decoded a piece at a time and into the narrowest types that hold the
+    # answer: an image-grid position is int32 and a parity is one of 2**ndim,
+    # where the coordinates they are read from are int64 and there is one per
+    # axis. Held whole those are several times the transfer they describe.
+    position = torch.empty(flat.numel(), dtype=torch.int32, device=flat.device)
+    identity = torch.empty(flat.numel(), dtype=torch.int8, device=flat.device)
+    for start in range(0, flat.numel(), _DECODE_CHUNK):
+        stop = min(start + _DECODE_CHUNK, flat.numel())
+        rest = flat[start:stop].to(torch.int64)
+        piece = torch.zeros_like(rest)
+        parity = torch.zeros_like(rest)
+        image_stride, bit = 1, 1
+        for axis in reversed(range(ndim)):
+            coordinate = rest % spatial_shape[axis]
+            rest = rest // spatial_shape[axis]
+            piece.add_(coordinate.div(2, rounding_mode="floor").mul_(image_stride))
+            parity.add_(coordinate.remainder_(2).mul_(bit))
+            image_stride *= image_shape[axis]
+            bit *= 2
+        position[start:stop] = piece.to(torch.int32)
+        identity[start:stop] = parity.to(torch.int8)
 
     values = as_torch(values)
     # Every component is stored over the same locations -- the union of what
@@ -414,10 +430,12 @@ def polyphase_components(
     lookup = torch.full(
         (int(prod(image_shape)),),
         -1,
-        dtype=torch.int64,
+        dtype=torch.int32,
         device=position.device,
     )
-    lookup[shared] = torch.arange(shared.numel(), device=position.device)
+    lookup[shared.to(torch.int64)] = torch.arange(
+        shared.numel(), dtype=torch.int32, device=position.device
+    )
 
     components = []
     for index in range(2**ndim):
@@ -428,8 +446,9 @@ def polyphase_components(
             dtype=values.dtype,
             device=values.device,
         )
-        part[:, lookup[position.index_select(0, chosen)].to(values.device)] = (
-            values.index_select(1, chosen.to(values.device))
+        placed = lookup[position.index_select(0, chosen).to(torch.int64)]
+        part[:, placed.to(torch.int64).to(values.device)] = values.index_select(
+            1, chosen.to(values.device)
         )
         components.append((parity, part, shared.to(torch.int32)))
     return components

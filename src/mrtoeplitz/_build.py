@@ -39,6 +39,10 @@ from ._kernel import (
 from ._options import _support_locations, _toeplitz_options
 from ._psf import gridding_streams, psf_plan, within_psf_plans
 
+#: How much of a grid a scan walks at once when it only needs a reduction of
+#: it. Small enough that the temporary is nothing beside the grid itself.
+_SCAN_CHUNK = 1 << 24
+
 #: Public name for the options validator.
 toeplitz_options = _toeplitz_options
 
@@ -131,10 +135,23 @@ def _complement_of(indices: Any, count: int, device: Any) -> Any | None:
 
 
 def _largest_left_out(stored: Any, left_out: Any | None) -> float:
-    """Return the largest magnitude of ``stored`` at the locations left out."""
+    """Return the largest magnitude of ``stored`` at the locations left out.
+
+    Walked in pieces. Taking the magnitude of the whole doubled grid at once
+    is a second grid's worth of float, and selecting through the mask is a
+    third; at the sizes this runs at that is what tips the build off the card.
+    """
     if left_out is None:
         return 0.0
-    return float(stored.abs().flatten()[left_out].max())
+    flat = stored.reshape(-1)
+    largest = 0.0
+    for start in range(0, flat.numel(), _SCAN_CHUNK):
+        stop = min(start + _SCAN_CHUNK, flat.numel())
+        piece = flat[start:stop].abs()
+        # Zero what is kept, so the maximum is over what is not.
+        piece.mul_(left_out[start:stop])
+        largest = max(largest, float(piece.max()))
+    return largest
 
 
 def _polyphase_wanted(
@@ -336,15 +353,23 @@ def _centring_signs(indices: Any, spatial_shape: tuple[int, ...]) -> Any:
     made to hold it.
     """
     torch = import_module("torch")
-    flat = as_torch(indices).to(torch.int64)
-    parity = torch.zeros_like(flat)
-    stride = 1
-    for size in reversed(spatial_shape):
-        parity = parity + (flat // stride) % size
-        stride *= size
-    # Real: it multiplies a complex transfer and a real one alike, and as
-    # complex it would be twice the size of what it is applied to.
-    return torch.where(parity % 2 == 0, 1.0, -1.0).to(torch.float32)
+    flat = as_torch(indices)
+    # One byte per location: it multiplies a complex transfer and a real one
+    # alike, and as float it is four times the size of what it says. Walked in
+    # pieces, because the coordinates it is read from are int64 and there is
+    # one per axis -- held whole that is several times the sign itself.
+    signs = torch.empty(flat.numel(), dtype=torch.int8, device=flat.device)
+    for start in range(0, flat.numel(), _SCAN_CHUNK):
+        stop = min(start + _SCAN_CHUNK, flat.numel())
+        piece = flat[start:stop].to(torch.int64)
+        parity = torch.zeros_like(piece)
+        stride = 1
+        for size in reversed(spatial_shape):
+            parity.add_(piece.div(stride, rounding_mode="floor").remainder_(size))
+            stride *= size
+        parity.remainder_(2)
+        signs[start:stop] = torch.where(parity == 0, 1, -1).to(torch.int8)
+    return signs
 
 
 def _subspace_pair_transfers(
@@ -405,9 +430,9 @@ def _subspace_pair_transfers(
     # The rows are assembled where they are gridded, so the sign belongs there
     # too rather than wherever the caller left the locations.
     signs = _centring_signs(indices, spatial_shape).to(samples.device)
-    # Selecting wants int64 and the support is held as int32: converting it
-    # per basis pair is that allocation ten times over.
-    selection = as_torch(indices).to(device=samples.device, dtype=torch.int64)
+    # index_select takes int32, and the support is held as int32: promoting it
+    # would double the largest index this build keeps.
+    selection = as_torch(indices).to(device=samples.device, dtype=torch.int32)
     # The transform is raw, and the convolution runs on the doubled grid,
     # so that grid's size is the whole normalization.
     scale = 1.0 / prod(spatial_shape)
@@ -423,7 +448,7 @@ def _subspace_pair_transfers(
         for pair in range(n_pairs):
             values = torch.repeat_interleave(coefficients[pair], repeats)
             if weights is not None:
-                values = values * weights
+                values.mul_(weights)
             values_view = values.reshape(1, 1, -1)
             del values
             psf = plan.grid(values_view).reshape(spatial_shape)
@@ -439,13 +464,13 @@ def _subspace_pair_transfers(
                 dropped = max(dropped, _largest_left_out(stored, left_out))
             selected = torch.index_select(flat, 0, selection)
             del psf, flat
-            row = selected * signs * scale
-            del selected
-            if not keep_complex:
-                row = row.real
+            # In place: each of these as a fresh tensor is another copy of the
+            # support, and there are three of them.
+            selected.mul_(signs).mul_(scale)
+            row = selected.real if not keep_complex else selected
             if ring is None:
                 packed[pair].copy_(row)
-                del row
+                del row, selected
                 continue
             slot = pair % len(ring)
             # This buffer may still hold an earlier pair. Landing it is a host
@@ -458,9 +483,9 @@ def _subspace_pair_transfers(
                 arrived.record(staging)
             # The allocator must not hand this block to the next pair while the
             # copy off it is still in flight.
-            row.record_stream(staging)
+            selected.record_stream(staging)
             pending[slot] = (arrived, pair)
-            del row
+            del row, selected
         for slot in range(0 if ring is None else len(ring)):
             _land(packed, ring, pending, slot)
     if compute is not None:
