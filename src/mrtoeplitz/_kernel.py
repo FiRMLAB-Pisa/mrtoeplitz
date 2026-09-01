@@ -675,6 +675,58 @@ class PolyphaseToeplitzKernel:
             lambda kernel, value: kernel._apply_streamed(value, streaming),
         )
 
+    def _apply_sense_streamed(
+        self,
+        image: Any,
+        maps: Any,
+        policy: Any,
+        *,
+        coil_group: int = 1,
+        map_cache: int = 0,
+    ) -> Any:
+        """Apply the SENSE normal with each component's transfer streamed.
+
+        The coil sandwich is diagonal, so it commutes with the linear phase a
+        component carries and the two compose in either order.
+
+        A map does not depend on the component, so one cache serves the whole
+        sweep: a coil expanded for the first component is read by the rest.
+        ``map_cache`` is how many may be held at once, which is what the device
+        has room for -- nothing kept is still correct, only slower.
+        """
+        expanded = _MapCache(map_cache)
+        try:
+            return self._accumulate(
+                image,
+                lambda kernel, value: kernel._apply_sense_streamed(
+                    value,
+                    maps,
+                    policy,
+                    coil_group=coil_group,
+                    expanded=expanded,
+                ),
+            )
+        finally:
+            expanded.clear()
+
+
+class _MapCache(dict):
+    """Expanded coil maps kept for reuse, up to what there is room for.
+
+    A map is the same for every parity component of a transfer, so expanding
+    one per component is that much repeated work. It is also a volume each, so
+    how many may be held is what the device has left rather than how many there
+    are: a cache of nothing is still correct.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        super().__init__()
+        self.capacity = max(0, int(capacity))
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if len(self) < self.capacity:
+            super().__setitem__(key, value)
+
 
 def _device_is_full(error: BaseException) -> bool:
     """Whether a runtime error is the allocator declining an allocation."""
@@ -1905,6 +1957,205 @@ class CompactToeplitzKernel:
                 non_blocking=policy.pin_memory,
             )
         torch.cuda.current_stream(policy.torch_device).synchronize()
+        return result
+
+    def _apply_sense_streamed(
+        self,
+        image: Any,
+        maps: Any,
+        policy: Any,
+        *,
+        coil_group: int = 1,
+        map_cache: int = 0,
+        expanded: dict[int, Any] | None = None,
+    ) -> Any:
+        """``sum_c conj(m_c) N(m_c x)`` with one walk of the transfer per group.
+
+        The transfer does not depend on the coil, so the coils of a group ride
+        a single walk of it as the batch the fused multiply already indexes:
+        host storage is read once for all of them rather than once each. Their
+        spectra over the support are what that costs, and how many of those fit
+        is what sets the group.
+
+        A coil's map is expanded where its spectrum is formed and again where
+        its share of the answer is taken off, so one map is resident at a time
+        however large the group -- unless the device has room to keep some,
+        which ``map_cache`` states.
+
+        Parameters
+        ----------
+        image
+            ``(batch, rank, *image_shape)``, complex.
+        maps
+            Sensitivities sliceable coil-wise: a ``(coils, *image_shape)``
+            tensor or a :class:`~mrtoeplitz.CoilKernels` bank.
+        policy
+            The :class:`~mrtoeplitz.CudaStreaming` policy to stream under.
+        coil_group
+            Coils sharing one walk of the transfer.
+        map_cache
+            How many expanded maps may be kept for reuse. A map is the same for
+            every component of a transfer filed by parity, so a bank of kernels
+            expands one per component sweep rather than one per component
+            unless nothing may be kept.
+        expanded
+            A cache shared with the rest of a component sweep. Made here when
+            none is given.
+
+        Returns
+        -------
+        array
+            Shaped like ``image``, on the device ``image`` is on.
+
+        Raises
+        ------
+        TypeError
+            If the transfer is not one the fused packed multiply reads.
+        """
+        torch = _torch()
+        if self.values.dtype not in {torch.bfloat16, torch.float32, torch.complex64}:
+            raise TypeError(
+                "streamed SENSE needs a transfer the fused packed multiply "
+                f"reads, not {self.values.dtype}"
+            )
+        if self.values.device.type != "cpu":
+            self.to("cpu")
+        device = policy.torch_device
+        batch = int(image.shape[0])
+        rank = self.rank
+        n_coils = int(maps.shape[0])
+        coil_group = max(1, min(int(coil_group), n_coils))
+        if expanded is None:
+            expanded = _MapCache(map_cache)
+
+        chunk_size = min(policy.transfer_chunk_size, self.n_locations)
+        transfer_precision = self._cuda_precision(
+            policy.transfer_precision,
+            device,
+        )
+        encoded_host = self._encoded_values_for("cpu", transfer_precision)
+        packed_shape, transfer_dtype = _cuda_transfer_spec(
+            self.values,
+            transfer_precision,
+            chunk_size,
+        )
+
+        axes = tuple(range(1, len(self.spatial_shape) + 1))
+        image_slices = (
+            slice(None),
+            *(slice(0, size) for size in self.image_shape),
+        )
+        indices_device = self.indices.to(device, dtype=torch.int32)
+        scatter_index = indices_device.to(torch.int64)
+        padded = torch.empty(
+            (batch, *self.spatial_shape),
+            dtype=image.dtype,
+            device=device,
+        )
+        spectra = torch.empty(
+            (coil_group, batch, rank, self.n_locations),
+            dtype=image.dtype,
+            device=device,
+        )
+        streams = [torch.cuda.Stream(device=device) for _ in range(policy.streams)]
+        host_packed = [
+            torch.empty(
+                packed_shape,
+                dtype=transfer_dtype,
+                pin_memory=policy.pin_memory,
+            )
+            for _ in range(policy.streams)
+        ]
+        device_packed = [
+            torch.empty(packed_shape, dtype=transfer_dtype, device=device)
+            for _ in range(policy.streams)
+        ]
+        result = torch.zeros(
+            (batch, rank, *self.image_shape),
+            dtype=image.dtype,
+            device=image.device,
+        )
+
+        def sensitivity(coil: int) -> Any:
+            """Expand one coil's map, or hand back the one already kept."""
+            if expanded is not None and coil in expanded:
+                return expanded[coil]
+            coil_map = as_torch(maps[coil]).to(device=device, dtype=image.dtype)
+            if expanded is not None:
+                expanded[coil] = coil_map
+            return coil_map
+
+        for first in range(0, n_coils, coil_group):
+            held = min(coil_group, n_coils - first)
+            for position in range(held):
+                coil_map = sensitivity(first + position)
+                for coefficient in range(rank):
+                    padded.zero_()
+                    window = padded[image_slices]
+                    window.copy_(image[:, coefficient])
+                    window.mul_(coil_map)
+                    torch.fft.fftn(padded, dim=axes, out=padded)
+                    torch.index_select(
+                        padded.flatten(start_dim=1),
+                        1,
+                        indices_device,
+                        out=spectra[position][:, coefficient],
+                    )
+                del coil_map
+
+            # The batch axis the fused multiply grids over is what carries the
+            # group, so one pass over host storage serves every coil in it.
+            active = spectra[:held].view(held * batch, rank, self.n_locations)
+            # Everything the chunk loop reads was written on the default
+            # stream, and a side stream is not ordered behind it: without this
+            # a chunk can be multiplied into a half-written spectrum, which is
+            # a wrong answer rather than a slow one.
+            entry = torch.cuda.current_stream(device)
+            for stream in streams:
+                stream.wait_stream(entry)
+            pending = [False] * policy.streams
+            for chunk_index, location in enumerate(
+                range(0, self.n_locations, chunk_size)
+            ):
+                end = min(location + chunk_size, self.n_locations)
+                count = end - location
+                slot = chunk_index % policy.streams
+                if pending[slot]:
+                    streams[slot].synchronize()
+                host_packed[slot][:, :count].copy_(encoded_host[:, location:end])
+                with torch.cuda.stream(streams[slot]):
+                    packed = device_packed[slot][:, :count]
+                    packed.copy_(
+                        host_packed[slot][:, :count],
+                        non_blocking=policy.pin_memory,
+                    )
+                    _packed_cuda_matvec(
+                        active,
+                        packed,
+                        location_start=location,
+                        count=count,
+                    )
+                pending[slot] = True
+            for slot in range(policy.streams):
+                if pending[slot]:
+                    streams[slot].synchronize()
+                    pending[slot] = False
+
+            for position in range(held):
+                coil_map = sensitivity(first + position).conj()
+                for coefficient in range(rank):
+                    flat = padded.flatten(start_dim=1)
+                    flat.zero_()
+                    flat.index_copy_(
+                        1,
+                        scatter_index,
+                        spectra[position][:, coefficient],
+                    )
+                    torch.fft.ifftn(padded, dim=axes, out=padded, norm="forward")
+                    combined = padded[image_slices] * coil_map
+                    result[:, coefficient] += combined.to(result.device)
+                del coil_map
+
         return result
 
     def _pin_host_storage(self) -> None:

@@ -1,9 +1,10 @@
-"""Streaming a transfer that does not fit the device.
+"""Streaming a transfer from the host rather than holding it on the card.
 
-A compressed transfer for a high-resolution subspace reconstruction can be
-larger than the card. Rather than refusing, it is held in pinned host memory
-and brought over in chunks, with the copy of one chunk overlapping the
-multiply of the one before it.
+A compressed transfer for a high-resolution subspace reconstruction is the
+largest thing in the reconstruction, and on a small card larger than the card.
+It is held in pinned host memory and brought over in chunks, with the copy of
+one chunk overlapping the multiply of the one before it, so what the device
+holds is the working set rather than the operator.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ def _torch() -> Any:
 
 @dataclass(frozen=True)
 class CudaStreaming:
-    """How a transfer too large for the device is streamed onto it.
+    """How a transfer held on the host is streamed onto a device.
 
     The transfer stays in pinned host memory and reaches the device in chunks
     of ``transfer_chunk_size`` locations. Each device owns ``streams`` CUDA

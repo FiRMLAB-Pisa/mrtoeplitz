@@ -25,6 +25,7 @@ __all__ = [
 ]
 
 from collections.abc import Sequence
+from contextlib import nullcontext, suppress
 from importlib import import_module
 from math import isqrt, prod
 from typing import Any
@@ -36,7 +37,7 @@ from ._kernel import (
     polyphase_components,
 )
 from ._options import _support_locations, _toeplitz_options
-from ._psf import psf_plan, within_psf_plans
+from ._psf import gridding_streams, psf_plan, within_psf_plans
 
 #: Public name for the options validator.
 toeplitz_options = _toeplitz_options
@@ -341,7 +342,9 @@ def _centring_signs(indices: Any, spatial_shape: tuple[int, ...]) -> Any:
     for size in reversed(spatial_shape):
         parity = parity + (flat // stride) % size
         stride *= size
-    return torch.where(parity % 2 == 0, 1.0, -1.0).to(torch.complex64)
+    # Real: it multiplies a complex transfer and a real one alike, and as
+    # complex it would be twice the size of what it is applied to.
+    return torch.where(parity % 2 == 0, 1.0, -1.0).to(torch.float32)
 
 
 def _subspace_pair_transfers(
@@ -351,7 +354,6 @@ def _subspace_pair_transfers(
     counts: Sequence[int],
     indices: Any,
     *,
-    streaming: Any | None = None,
     keep_complex: bool = True,
     tolerance: float | None = None,
 ) -> tuple[Any, float]:
@@ -387,50 +389,131 @@ def _subspace_pair_transfers(
     repeats = torch.tensor(counts, device=samples.device)
     coefficients = torch.stack([block[2] for block in blocks], dim=1)
 
-    plan = psf_plan(spatial_shape, samples, tolerance)
+    n_pairs = int(blocks[0][2].numel())
+    n_locations = int(as_torch(indices).numel())
+    row_dtype = torch.complex64 if keep_complex else torch.float32
+    packed = torch.empty((n_pairs, n_locations), dtype=row_dtype, device="cpu")
+    # Where the rows go is settled before anything is planned, because whether
+    # the gridding gets a stream of its own depends on there being something to
+    # overlap it with.
+    ring = _staging_ring(n_locations, row_dtype, samples.device.type == "cuda")
+    compute, staging = (
+        gridding_streams(samples.device) if ring is not None else (None, None)
+    )
+    plan = psf_plan(spatial_shape, samples, tolerance, streamed=ring is not None)
     axes = tuple(range(len(spatial_shape)))
-    signs = _centring_signs(indices, spatial_shape)
+    # The rows are assembled where they are gridded, so the sign belongs there
+    # too rather than wherever the caller left the locations.
+    signs = _centring_signs(indices, spatial_shape).to(samples.device)
+    # Selecting wants int64 and the support is held as int32: converting it
+    # per basis pair is that allocation ten times over.
+    selection = as_torch(indices).to(device=samples.device, dtype=torch.int64)
     # The transform is raw, and the convolution runs on the doubled grid,
     # so that grid's size is the whole normalization.
     scale = 1.0 / prod(spatial_shape)
-    n_pairs = int(blocks[0][2].numel())
     left_out = _complement_of(indices, prod(spatial_shape), samples.device)
     dropped = 0.0
+    pending: list[tuple[Any, int] | None] = [None, None]
 
-    packed = None
     coefficients = coefficients.to(device=samples.device, dtype=torch.complex64)
-    for pair in range(n_pairs):
-        values = torch.repeat_interleave(coefficients[pair], repeats)
-        if weights is not None:
-            values = values * weights
-        values_view = values.reshape(1, 1, -1)
-        del values
-        psf = plan.grid(values_view).reshape(spatial_shape)
-        # Transformed in place, and the centring folded into a sign on the
-        # locations kept: shifting the point-spread function by half the grid
-        # is the same as alternating the sign of what comes out, and a copy of
-        # the doubled grid is the largest thing a build holds after the plan.
-        torch.fft.fftn(psf, dim=axes, out=psf)
-        flat = psf.reshape(-1)
-        if left_out is not None:
-            stored = flat.real if not keep_complex else flat
-            dropped = max(dropped, _largest_left_out(stored, left_out))
-        selected = _selected_transfer(flat, indices, streaming=streaming)
-        del psf, flat
-        row = selected * signs * scale
-        del selected
-        if not keep_complex:
-            row = row.real
-        if packed is None:
-            packed = torch.empty(
-                (n_pairs, row.numel()),
-                dtype=row.dtype,
-                device="cpu",
-            )
-        packed[pair].copy_(row)
-        del row
-    assert packed is not None
+    # A pair's transfer leaves for the host while the next one is gridded. The
+    # plan issues its own work to the compute stream, so the build runs there
+    # too and the staging stream is the only thing that has to wait.
+    with _on_stream(compute):
+        for pair in range(n_pairs):
+            values = torch.repeat_interleave(coefficients[pair], repeats)
+            if weights is not None:
+                values = values * weights
+            values_view = values.reshape(1, 1, -1)
+            del values
+            psf = plan.grid(values_view).reshape(spatial_shape)
+            # Transformed in place, and the centring folded into a sign on the
+            # locations kept: shifting the point-spread function by half the
+            # grid is the same as alternating the sign of what comes out, and a
+            # copy of the doubled grid is the largest thing a build holds after
+            # the plan.
+            torch.fft.fftn(psf, dim=axes, out=psf)
+            flat = psf.reshape(-1)
+            if left_out is not None:
+                stored = flat.real if not keep_complex else flat
+                dropped = max(dropped, _largest_left_out(stored, left_out))
+            selected = torch.index_select(flat, 0, selection)
+            del psf, flat
+            row = selected * signs * scale
+            del selected
+            if not keep_complex:
+                row = row.real
+            if ring is None:
+                packed[pair].copy_(row)
+                del row
+                continue
+            slot = pair % len(ring)
+            # This buffer may still hold an earlier pair. Landing it is a host
+            # copy, and it runs while the device grids the next one.
+            _land(packed, ring, pending, slot)
+            staging.wait_stream(compute)
+            with torch.cuda.stream(staging):
+                ring[slot].copy_(row, non_blocking=True)
+                arrived = torch.cuda.Event()
+                arrived.record(staging)
+            # The allocator must not hand this block to the next pair while the
+            # copy off it is still in flight.
+            row.record_stream(staging)
+            pending[slot] = (arrived, pair)
+            del row
+        for slot in range(0 if ring is None else len(ring)):
+            _land(packed, ring, pending, slot)
+    if compute is not None:
+        torch.cuda.current_stream(samples.device).wait_stream(compute)
     return packed, dropped
+
+
+def _on_stream(stream: Any) -> Any:
+    """Run on ``stream``, ordered behind whatever the caller was on."""
+    torch = import_module("torch")
+    if stream is None:
+        return nullcontext()
+    stream.wait_stream(torch.cuda.current_stream(stream.device))
+    return torch.cuda.stream(stream)
+
+
+def _staging_ring(n_locations: int, dtype: Any, staged: bool) -> list[Any] | None:
+    """Return pinned buffers a finished row leaves on, or None to copy directly.
+
+    Only pinned memory takes an asynchronous copy; out of pageable memory the
+    driver stages it through a buffer of its own and the call blocks, which is
+    the overlap lost. Pinning the whole transfer would buy that overlap and cost
+    seconds to page-lock -- more than the copying it saves -- so what is pinned
+    is two rows, and each is landed in the transfer while the device grids the
+    next pair.
+    """
+    torch = import_module("torch")
+    if not staged:
+        return None
+    wanted = 2 * n_locations * torch.empty(0, dtype=dtype).element_size()
+    try:
+        import psutil
+
+        if wanted > 0.25 * psutil.virtual_memory().available:
+            return None
+    except Exception:
+        return None
+    with suppress(RuntimeError):
+        return [
+            torch.empty(n_locations, dtype=dtype, pin_memory=True) for _ in range(2)
+        ]
+    return None
+
+
+def _land(packed: Any, ring: list[Any], pending: list[Any], slot: int) -> None:
+    """Copy whatever a staging buffer holds into the row it belongs to."""
+    held = pending[slot]
+    if held is None:
+        return
+    arrived, pair = held
+    arrived.synchronize()
+    packed[pair].copy_(ring[slot])
+    pending[slot] = None
 
 
 def _subspace_kernel_from_blocks(
@@ -469,10 +552,13 @@ def _subspace_kernel_from_blocks(
     samples = torch.cat([as_torch(block[0]).reshape(-1, ndim) for block in blocks])
     coefficients = as_torch(blocks[0][2])
     stripped = [(None, block[1], block[2]) for block in blocks]
+    # The support is read where the gridding happens. A policy puts the
+    # kernel's copy of it on the host afterwards; computing it there instead
+    # would send it back for every basis pair.
     indices = _support_locations(
         samples,
         spatial_shape,
-        "cpu" if streaming is not None else samples.device,
+        samples.device,
         options["compress"],
     )
     packed, dropped = _subspace_pair_transfers(
@@ -481,10 +567,11 @@ def _subspace_kernel_from_blocks(
         samples,
         counts,
         indices,
-        streaming=streaming,
         keep_complex=bool(coefficients.is_complex()),
         tolerance=options["gridding_tolerance"],
     )
+    if streaming is not None:
+        indices = indices.to("cpu")
     values = (
         packed.to(coefficients.dtype)
         if coefficients.is_complex()

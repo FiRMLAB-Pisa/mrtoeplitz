@@ -11,6 +11,14 @@ import torch
 import mrtoeplitz as mt
 
 WHOLE = mt.toeplitz_options(compress=False, gridding_tolerance=1e-4)
+#: The same, with the resident CUDA lane held at single precision. Its default
+#: is bfloat16, which is two decimal digits away from anything a streamed lane
+#: at float32 answers -- a yardstick has to be in the precision it measures.
+EXACT = mt.toeplitz_options(
+    compress=False,
+    gridding_tolerance=1e-4,
+    cuda_transfer_precision="float32",
+)
 cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA device")
 
 
@@ -175,3 +183,209 @@ def test_the_streamed_lane_agrees_with_itself_over_many_applications(resident):
         error = torch.linalg.vector_norm(image.grad - expected)
         worst = max(worst, float(error / torch.linalg.vector_norm(expected)))
     assert worst < 1e-5
+
+
+@pytest.fixture
+def sense(radial, image):
+    """A multicoil normal applied the ordinary way, as the yardstick."""
+    trajectory = radial(n_spokes=32, n_samples=64)
+    x = torch.as_tensor(image(shape=(32, 32)))[None, None]
+    torch.manual_seed(0)
+    maps = torch.randn(4, 32, 32, dtype=torch.complex64)
+    maps = maps / maps.abs().amax()
+    # A transfer on the device stays there: that is how a caller asks for the
+    # resident lane, which is the yardstick a streamed one is measured against.
+    kernel = mt.scalar_kernel(trajectory, (32, 32), options=EXACT).to("cuda")
+    truth = mt.apply_sense(kernel, x.cuda(), maps.cuda(), coil_batch_size=1)
+    return trajectory, x, maps, truth
+
+
+@pytest.mark.cuda
+@cuda_only
+@pytest.mark.parametrize("coil_group", [1, 2, 4])
+def test_a_streamed_sense_application_agrees_with_the_resident_one(sense, coil_group):
+    """The group changes how often the transfer is read, not the answer."""
+    trajectory, x, maps, truth = sense
+    policy = mt.CudaStreaming(streams=2, transfer_precision="float32")
+    kernel = mt.scalar_kernel(trajectory, (32, 32), options=EXACT)
+    got = kernel._apply_sense_streamed(
+        x.cuda(), maps.cuda(), policy, coil_group=coil_group
+    )
+    error = torch.linalg.vector_norm(got - truth) / torch.linalg.vector_norm(truth)
+    assert float(error) < 1e-5
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_a_coil_group_reads_the_transfer_once_for_every_coil_in_it(sense, monkeypatch):
+    """The transfer does not depend on the coil, so a group reads it once.
+
+    Reading it per coil is what a streamed application costs most, and it is
+    the same bytes every time. Counting the chunk multiplies is what
+    distinguishes one walk of it from one per coil.
+    """
+    from mrtoeplitz import _kernel
+
+    trajectory, x, maps, _ = sense
+    policy = mt.CudaStreaming(streams=2, transfer_precision="float32")
+    kernel = mt.scalar_kernel(trajectory, (32, 32), options=EXACT)
+
+    def walks(coil_group):
+        calls = 0
+        original = _kernel._packed_cuda_matvec
+
+        def counted(*arguments, **keywords):
+            nonlocal calls
+            calls += 1
+            return original(*arguments, **keywords)
+
+        monkeypatch.setattr(_kernel, "_packed_cuda_matvec", counted)
+        kernel._apply_sense_streamed(
+            x.cuda(), maps.cuda(), policy, coil_group=coil_group
+        )
+        monkeypatch.undo()
+        return calls
+
+    assert walks(4) * 4 == walks(1)
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_a_kernel_built_for_a_policy_streams_its_sense_application(sense):
+    """Streaming is what the kernel was built for, not an argument to repeat."""
+    trajectory, x, maps, truth = sense
+    policy = mt.CudaStreaming(streams=2, transfer_precision="float32")
+    kernel = mt.scalar_kernel(trajectory, (32, 32), options=EXACT, streaming=policy)
+    assert kernel.values.device.type == "cpu"
+    got = mt.apply_sense(kernel, x.cuda(), maps.cuda())
+    assert kernel.values.device.type == "cpu"
+    error = torch.linalg.vector_norm(got - truth) / torch.linalg.vector_norm(truth)
+    assert float(error) < 1e-5
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_the_streamed_sense_lane_agrees_with_itself_over_many_applications(sense):
+    """A stream-ordering fault shows up as a rate, not as a failure.
+
+    The chunk loop runs on side streams over spectra the default stream wrote,
+    and unordered it reads them before they are finished. Four hundred trials
+    is what it took to see the scalar lane's fault at all; this holds the
+    coil loop to the same standard.
+    """
+    trajectory, x, maps, truth = sense
+    policy = mt.CudaStreaming(streams=2, transfer_precision="float32")
+    kernel = mt.scalar_kernel(trajectory, (32, 32), options=EXACT)
+    scale = torch.linalg.vector_norm(truth)
+    worst = 0.0
+    for trial in range(400):
+        got = kernel._apply_sense_streamed(
+            x.cuda(), maps.cuda(), policy, coil_group=1 + trial % 4
+        )
+        worst = max(worst, float(torch.linalg.vector_norm(got - truth) / scale))
+    assert worst < 1e-5
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_a_kept_map_is_expanded_once_for_the_whole_component_sweep(sense):
+    """A map does not depend on the parity component that reads it.
+
+    A transfer filed by parity applies one component after another over the
+    same image grid, and expanding a bank's coil afresh for each of them is
+    that work repeated. What the device has room to keep, it keeps.
+    """
+    trajectory, x, maps, _ = sense
+    policy = mt.CudaStreaming(streams=2, transfer_precision="float32")
+    kernel = mt.scalar_kernel(trajectory, (32, 32), options=EXACT)
+    bank = mt.CoilKernels.from_maps(maps, (8, 8)).to("cuda")
+
+    class Counted:
+        """A bank that records how often it is asked to expand a coil."""
+
+        def __init__(self, held):
+            self.held = held
+            self.expansions = 0
+
+        def __getattr__(self, name):
+            return getattr(self.held, name)
+
+        def __getitem__(self, index):
+            self.expansions += 1
+            return self.held[index]
+
+    def run(map_cache):
+        counted = Counted(bank)
+        got = kernel._apply_sense_streamed(
+            x.cuda(),
+            counted,
+            policy,
+            coil_group=len(maps),
+            map_cache=map_cache,
+        )
+        return counted.expansions, got
+
+    kept, with_cache = run(len(maps))
+    fresh, without_cache = run(0)
+    assert kept == len(maps)
+    assert fresh > kept
+    # What is kept is what would have been expanded again, so keeping it
+    # cannot change the answer.
+    assert torch.equal(with_cache, without_cache)
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_a_staged_build_grids_the_same_transfer_as_an_unstaged_one(radial):
+    """Staging is where the rows go, not what they are.
+
+    A build under a policy puts each basis pair's rows on the host as it
+    finishes them, on a stream of their own so the copy overlaps the gridding
+    of the next pair. The gridding itself is untouched, and what it produces
+    has to agree to what a build agrees with itself to -- which is not exact:
+    the spreading behind it accumulates in parallel.
+    """
+    torch.manual_seed(0)
+    trajectory = torch.as_tensor(radial(n_spokes=48, n_samples=96)).cuda()
+    basis = torch.linalg.qr(torch.randn(60, 3))[0]
+
+    def transfer(streaming):
+        kernel = mt.subspace_kernel(
+            trajectory, basis, (32, 32), options=WHOLE, streaming=streaming
+        )
+        return torch.cat([part.values.cpu().flatten() for _, part in kernel.components])
+
+    reproducible = float((transfer(None) - transfer(None)).abs().max())
+    policy = mt.CudaStreaming(streams=2)
+    staged = float((transfer(policy) - transfer(None)).abs().max())
+    assert staged <= max(reproducible * 4, 1e-9)
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_a_host_held_transfer_is_streamed_without_being_asked(sense):
+    """The default: what a build left on the host is not pulled across.
+
+    A transfer is the largest thing in a subspace reconstruction. Moving it
+    onto the card to apply it puts it there for the length of the solve, and
+    the point of the package is that it does not have to be.
+    """
+    trajectory, x, maps, truth = sense
+    kernel = mt.scalar_kernel(trajectory, (32, 32), options=EXACT)
+    assert kernel.values.device.type == "cpu"
+    got = mt.apply_sense(kernel, x.cuda(), maps.cuda())
+    assert kernel.values.device.type == "cpu"
+    error = torch.linalg.vector_norm(got - truth) / torch.linalg.vector_norm(truth)
+    # Streamed by default is streamed in bfloat16 by default, which is what
+    # halves what crosses; two decimal digits is what it costs.
+    assert float(error) < 5e-3
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_a_transfer_put_on_the_device_is_left_there(sense):
+    """Moving it across is a decision to keep it across."""
+    trajectory, x, maps, _ = sense
+    kernel = mt.scalar_kernel(trajectory, (32, 32), options=EXACT).to("cuda")
+    mt.apply_sense(kernel, x.cuda(), maps.cuda())
+    assert kernel.values.device.type == "cuda"

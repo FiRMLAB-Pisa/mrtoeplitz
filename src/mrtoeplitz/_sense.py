@@ -16,6 +16,7 @@ from typing import Any
 
 from ._coils import CoilKernels
 from ._kernel import CompactToeplitzKernel, _device_is_full, as_torch
+from ._streaming import CudaStreaming
 
 
 def _sense_maps(maps: Any, reference: Any, image_shape: tuple[int, ...]) -> Any:
@@ -95,6 +96,130 @@ def _coils_split_across_devices(
     return total
 
 
+def _transfer_is_on_the_host(kernel: CompactToeplitzKernel) -> bool:
+    """Whether the transfer this kernel applies is held on the host."""
+    components = getattr(kernel, "components", None)
+    parts = [part for _, part in components] if components else [kernel]
+    return all(part.values.device.type == "cpu" for part in parts)
+
+
+def _default_streaming(kernel: CompactToeplitzKernel, image: Any) -> Any:
+    """Stream a host-held transfer onto a device rather than move it whole.
+
+    A build leaves the transfer on the host, and pulling it across for an
+    application puts the largest thing in the reconstruction on the card for
+    the length of the solve. Streaming it is what the package is for, so it is
+    what happens unless the caller has already put the transfer on the device,
+    which is a decision to keep it there.
+    """
+    if image.device.type != "cuda" or not _transfer_is_on_the_host(kernel):
+        return None
+    return CudaStreaming(device=str(image.device))
+
+
+def _streamed_extent(kernel: CompactToeplitzKernel) -> tuple[int, tuple[int, ...]]:
+    """Return the support and grid a streamed application works over.
+
+    A kernel filed by parity applies one component at a time over identically
+    shaped images, so the largest component's support is what its buffers have
+    to hold.
+    """
+    components = getattr(kernel, "components", None)
+    if not components:
+        return kernel.n_locations, kernel.spatial_shape
+    locations = max(part.n_locations for _, part in components)
+    return locations, components[0][1].spatial_shape
+
+
+def _streamed_plan(
+    kernel: CompactToeplitzKernel,
+    image: Any,
+    streaming: Any,
+    n_coils: int,
+) -> tuple[int, int]:
+    """Choose how many coils share a walk of the transfer, and how many maps stay.
+
+    Reading the transfer once per coil sends it across as many times as there
+    are coils, and it is the same transfer every time. Coils grouped into the
+    batch the fused multiply already indexes share one reading of it, at the
+    cost of holding a spectrum per coil for the length of the walk. That
+    spectrum is the only part of the apply that grows with the group, so what
+    is free after everything else divided by one of them is how many coils fit
+    -- one on a card with no room, all of them on a card with plenty.
+
+    Whatever is free after that decides how many expanded maps are kept. A map
+    is the same for every component of a transfer filed by parity, so one kept
+    is one not expanded seven more times; a volume each is what that costs, and
+    keeping none is slower rather than wrong.
+    """
+    torch = import_module("torch")
+    device = streaming.torch_device
+    locations, spatial_shape = _streamed_extent(kernel)
+    element = image.element_size()
+    per_coil = image.shape[0] * kernel.rank * locations * element
+    if per_coil <= 0:
+        return 1, 0
+    volume = 1
+    for size in spatial_shape:
+        volume *= size
+    image_volume = 1
+    for size in kernel.image_shape:
+        image_volume *= size
+    packed_rows = kernel.rank * (kernel.rank + 1) // 2
+    fixed = (
+        # The padded volume and the transform's own workspace behind it.
+        2 * image.shape[0] * volume * element
+        # The answer, and the one coil map that is resident beside it.
+        + (image.shape[0] * kernel.rank + 1) * image_volume * element
+        # Support indices, kept as int32 and again as the int64 the scatter
+        # insists on.
+        + locations * 12
+        # One transfer chunk per stream, on the device and staged on the host.
+        + streaming.streams * streaming.transfer_chunk_size * packed_rows * 4
+    )
+    free, _ = torch.cuda.mem_get_info(device)
+    # Torch does not return a freed block to the driver, so what its allocator
+    # is holding but not using is free to this apply even though the driver
+    # counts it as taken.
+    reusable = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+    headroom = int((free + reusable) * streaming.max_device_fraction) - fixed
+    group = max(1, min(n_coils, headroom // per_coil))
+    left = headroom - group * per_coil
+    cached = max(0, min(n_coils, left // (image_volume * element)))
+    return group, cached
+
+
+def _apply_sense_streamed(
+    kernel: CompactToeplitzKernel,
+    image: Any,
+    maps: Any,
+    streaming: Any,
+    n_coils: int,
+) -> Any:
+    """Stream a SENSE application, halving the coil group if it will not fit.
+
+    The group is chosen from what the device reports free, which is a estimate
+    of what an allocation will actually find. Where it is over, the answer is
+    the same at a smaller group -- only more walks of the transfer.
+    """
+    group, cached = _streamed_plan(kernel, image, streaming, n_coils)
+    while True:
+        try:
+            return kernel._apply_sense_streamed(
+                image,
+                maps,
+                streaming,
+                coil_group=group,
+                map_cache=cached,
+            )
+        except RuntimeError as error:
+            if group == 1 or not _device_is_full(error):
+                raise
+            group = max(1, group // 2)
+            cached = cached // 2
+            import_module("torch").cuda.empty_cache()
+
+
 def _apply_sense(
     kernel: CompactToeplitzKernel,
     image: Any,
@@ -123,7 +248,8 @@ def _apply_sense(
     coil_batch_size
         Coils per pass. One keeps the least in flight.
     streaming
-        Where a transfer too large for the device is staged.
+        How a host-held transfer reaches the device. A transfer on the host is
+        streamed whether or not this is given; giving it says how.
 
     Returns
     -------
@@ -131,6 +257,13 @@ def _apply_sense(
         ``sum_c conj(m_c) N(m_c x)``, shaped like ``image``.
     """
     torch = import_module("torch")
+    if streaming is None:
+        # A kernel built for a policy applies under it; one built without still
+        # streams a transfer that is on the host, which is where a build leaves
+        # it.
+        streaming = getattr(kernel, "streaming", None) or _default_streaming(
+            kernel, image
+        )
     if streaming is not None and streaming.device_count > 1:
         # Coils are independent until their final SENSE reduction.  Group at
         # least one coil per device so even a single-image reconstruction can
@@ -165,6 +298,14 @@ def _apply_sense(
             batched_maps=batched_maps,
             n_coils=n_coils,
         )
+    if (
+        streaming is not None
+        and not batched_maps
+        and right_factors is None
+        and left_factors is None
+        and hasattr(kernel, "_apply_sense_streamed")
+    ):
+        return _apply_sense_streamed(kernel, image, maps, streaming, n_coils)
     result_rank = 1 if left_factors is not None else kernel.rank
     result = torch.zeros(
         (image.shape[0], result_rank, *kernel.image_shape),
@@ -380,7 +521,8 @@ def apply_sense(
     coil_batch_size
         Coils per pass. One keeps the least in flight.
     streaming
-        Where a transfer too large for the device is staged.
+        How a host-held transfer reaches the device. A transfer on the host is
+        streamed whether or not this is given; giving it says how.
 
     Returns
     -------

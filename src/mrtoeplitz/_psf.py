@@ -13,9 +13,15 @@ moves afterwards with :meth:`~mrtoeplitz.CompactToeplitzKernel.to`.
 
 from __future__ import annotations
 
-__all__ = ["PsfPlan", "psf_plan", "psf_plans", "within_psf_plans"]
+__all__ = [
+    "PsfPlan",
+    "gridding_streams",
+    "psf_plan",
+    "psf_plans",
+    "within_psf_plans",
+]
 
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from functools import wraps
 from importlib import import_module
 from typing import Any
@@ -40,6 +46,40 @@ _TOLERANCE = 1e-3
 #: makes -- larger than the kernel it produces -- and holding a second is what
 #: makes a build run out of device memory.
 _PLAN_SLOT: dict[tuple[Any, ...], Any] = {}
+
+#: One compute and one staging stream per device, held for the process.
+_STREAMS: dict[str, tuple[Any, Any]] = {}
+
+
+def gridding_streams(device: Any) -> tuple[Any, Any]:
+    """Return the compute and staging streams a device's gridding runs on.
+
+    A plan is built to execute on the compute stream and the values it produces
+    leave on the staging one, so the copy of one basis pair's transfer overlaps
+    the gridding of the next instead of stopping it. Holding them for the
+    process rather than per build is what lets a plan be reused: a plan is
+    bound at construction to the stream it was given.
+
+    Parameters
+    ----------
+    device
+        The CUDA device to run on.
+
+    Returns
+    -------
+    tuple
+        The compute stream and the staging stream.
+    """
+    torch = import_module("torch")
+    key = str(device)
+    held = _STREAMS.get(key)
+    if held is None:
+        held = (
+            torch.cuda.Stream(device=device),
+            torch.cuda.Stream(device=device),
+        )
+        _STREAMS[key] = held
+    return held
 
 
 def _finufft(device: Any) -> Any:
@@ -93,6 +133,11 @@ class PsfPlan:
     samples
         The trajectory, ``(samples, axes)``, in normalized k-space. Its device
         decides whether the transform runs on the host or on a device.
+    streamed
+        Whether the caller stages what this produces on a stream of its own.
+        Naming a stream for the plan is what lets the two overlap, and it is not
+        free -- gridding is quicker on the default stream -- so a build with
+        nothing to overlap leaves it there.
     """
 
     def __init__(
@@ -100,6 +145,7 @@ class PsfPlan:
         spatial_shape: tuple[int, ...],
         samples: Any,
         tolerance: float | None = None,
+        streamed: bool = False,
     ) -> None:
         torch = import_module("torch")
         self.spatial_shape = tuple(int(size) for size in spatial_shape)
@@ -107,6 +153,19 @@ class PsfPlan:
         self._cuda = "cuda" in str(self.device)
         library = _finufft(self.device)
         _yield_cached_device_memory(self.device)
+        options = _plan_options(tolerance)
+        self.compute = (
+            gridding_streams(self.device)[0] if self._cuda and streamed else None
+        )
+        if self.compute is not None:
+            import ctypes
+
+            # Torch issues its work on its own stream and the plan would
+            # otherwise issue on the legacy default one, where they are ordered
+            # only by that stream's implicit synchronisation -- which is what
+            # the staging stream needs not to be subject to. Naming the stream
+            # puts the two on the same one deliberately.
+            options["gpu_stream"] = ctypes.c_void_p(self.compute.cuda_stream)
         self._plan = library.Plan(
             1,
             self.spatial_shape,
@@ -117,7 +176,7 @@ class PsfPlan:
             # sign on the locations it keeps, and that assumes k-space centre
             # sits in the middle of what comes back.
             modeord=0,
-            **_plan_options(tolerance),
+            **options,
         )
         self._out = (
             torch.empty(self.spatial_shape, dtype=torch.complex64, device=self.device)
@@ -138,11 +197,14 @@ class PsfPlan:
         import math
 
         torch = import_module("torch")
-        radians = (samples.to(torch.float32) * (2.0 * math.pi)).to(self.device)
-        columns = [radians[:, axis].contiguous() for axis in range(radians.shape[1])]
-        if not self._cuda:
-            columns = [column.numpy() for column in columns]
-        self._plan.setpts(*columns)
+        with self._on_compute():
+            radians = (samples.to(torch.float32) * (2.0 * math.pi)).to(self.device)
+            columns = [
+                radians[:, axis].contiguous() for axis in range(radians.shape[1])
+            ]
+            if not self._cuda:
+                columns = [column.numpy() for column in columns]
+            self._plan.setpts(*columns)
         self.n_samples = int(samples.shape[0])
 
     def grid(self, weights: Any) -> Any:
@@ -152,18 +214,33 @@ class PsfPlan:
         stated where the transfer is assembled rather than hidden here.
         """
         torch = import_module("torch")
-        weights = weights.reshape(-1).to(torch.complex64).contiguous()
-        if self._cuda:
-            self._plan.execute(weights, out=self._out)
-            return self._out
-        gridded = self._plan.execute(weights.cpu().numpy())
-        return torch.from_numpy(gridded).to(torch.complex64)
+        with self._on_compute():
+            weights = weights.reshape(-1).to(torch.complex64).contiguous()
+            if self._cuda:
+                self._plan.execute(weights, out=self._out)
+                return self._out
+            gridded = self._plan.execute(weights.cpu().numpy())
+            return torch.from_numpy(gridded).to(torch.complex64)
+
+    def _on_compute(self) -> Any:
+        """Run on the stream the plan issues its own work to.
+
+        The plan was built for that stream, so whatever it reads has to be
+        written there. Entering it also orders it behind the caller's stream,
+        which is where a build assembles the weights it hands over.
+        """
+        torch = import_module("torch")
+        if self.compute is None:
+            return nullcontext()
+        self.compute.wait_stream(torch.cuda.current_stream(self.device))
+        return torch.cuda.stream(self.compute)
 
 
 def psf_plan(
     spatial_shape: tuple[int, ...],
     samples: Any,
     tolerance: float | None = None,
+    streamed: bool = False,
 ) -> PsfPlan:
     """Return the build's gridding plan, retargeted at ``samples``."""
     shape = tuple(int(size) for size in spatial_shape)
@@ -172,13 +249,16 @@ def psf_plan(
         shape,
         int(samples.shape[0]),
         tolerance,
+        # A plan is bound at construction to the stream it issues on, so one
+        # made for a streamed build is not the one an unstreamed build wants.
+        streamed,
     )
     held = _PLAN_SLOT.get(key)
     if held is not None:
         held.setpts(samples)
         return held
     _PLAN_SLOT.clear()
-    plan = PsfPlan(shape, samples, tolerance)
+    plan = PsfPlan(shape, samples, tolerance, streamed)
     _PLAN_SLOT[key] = plan
     return plan
 
