@@ -722,6 +722,16 @@ class PolyphaseToeplitzKernel:
             lambda kernel, value: kernel._apply_streamed(value, streaming),
         )
 
+    def release(self) -> None:
+        """Drop what every component keeps between applications."""
+        for _, kernel in self.components:
+            kernel.release()
+        self._phases.clear()
+
+    def __del__(self) -> None:
+        with suppress(Exception):
+            self.release()
+
     def _apply_sense_streamed(
         self,
         image: Any,
@@ -2204,6 +2214,22 @@ class CompactToeplitzKernel:
                 del coil_map
 
         return result
+
+    def release(self) -> None:
+        """Drop everything an application keeps, so the device gets it back.
+
+        A kernel holds the buffers its lane works out of between calls, and the
+        encodings of the transfer it has been asked for. They are the kernel's
+        to keep -- a solve applies it many times -- and the kernel's to give up.
+        Torch takes them into its own pool; ``torch.cuda.empty_cache()`` is what
+        hands that pool back to the driver.
+        """
+        self._stream_workspaces.clear()
+        self._cuda_value_cache.clear()
+
+    def __del__(self) -> None:
+        with suppress(Exception):
+            self.release()
 
     def _pin_host_storage(self) -> None:
         """Hold the kernel where the device can read it without a staging copy.

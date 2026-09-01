@@ -389,3 +389,30 @@ def test_a_transfer_put_on_the_device_is_left_there(sense):
     kernel = mt.scalar_kernel(trajectory, (32, 32), options=EXACT).to("cuda")
     mt.apply_sense(kernel, x.cuda(), maps.cuda())
     assert kernel.values.device.type == "cuda"
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_a_kernel_gives_the_device_back_when_it_is_released(sense):
+    """What an application keeps is the kernel's, and goes when the kernel does.
+
+    A kernel holds the buffers its lane works out of between calls so a solve
+    does not allocate them per iteration. Nothing else may hold them: releasing
+    the kernel has to return every byte of it.
+    """
+    trajectory, x, maps, _ = sense
+    kernel = mt.scalar_kernel(trajectory, (32, 32), options=EXACT)
+    image, coils = x.cuda(), maps.cuda()
+
+    def resident():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        return torch.cuda.memory_allocated()
+
+    before = resident()
+    for _ in range(3):
+        mt.apply_sense(kernel, image, coils)
+    held = resident() - before
+    assert held > 0, "an application is expected to keep its working buffers"
+    kernel.release()
+    assert resident() == before
