@@ -19,7 +19,7 @@ def _toeplitz_options(
     cuda_max_device_fraction: float = 0.85,
     cuda_transfer_precision: str = "auto",
     gridding_tolerance: float | None = None,
-    decomposed_build: bool | str = "auto",
+    decomposed_build: bool | str = True,
 ) -> dict[str, Any]:
     """Validate how a Toeplitz kernel is applied.
 
@@ -55,10 +55,14 @@ def _toeplitz_options(
     tighter one.
 
     ``decomposed_build`` grids those components straight onto the image grid
-    rather than making the doubled grid and splitting it afterwards. It is the
-    same operator, and it is eight times the spreading -- every component
-    spreads every sample -- so ``"auto"`` takes it only when the doubled grid
-    is what will not fit.
+    rather than making the doubled grid and splitting it afterwards, which is
+    the default. It is the same operator to what the gridding resolves, and it
+    is eight times the spreading -- every component spreads every sample. That
+    buys the resolutions where the doubled grid and the grid a transform
+    spreads onto no longer fit at all, and it is paid once: a transfer needs
+    the trajectory and the basis and none of the data, so it is built while the
+    scan is still running. ``"auto"`` takes it only where the doubled grid is
+    what will not fit, and ``False`` never.
 
     ``polyphase`` files the transfer as one component per parity of the
     doubled grid's coordinates, so the convolution runs on the image grid and

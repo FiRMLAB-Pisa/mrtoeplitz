@@ -102,16 +102,23 @@ both devices, agreeing to `4e-4`, which is what the gridding tolerance allows.
 
 | | RAM | VRAM | `A^H y` | kernel creation | kernel apply |
 |---|---|---|---|---|---|
-| CPU | 17.6 GiB | — | 52.8 s | 89.1 s | 61.1 s |
-| CUDA | 14.7 GiB | 7.7 GiB | 14.5 s | 31.6 s | 6.9 s |
-| FFT floor, CUDA | 0.7 GiB | 3.1 GiB | — | — | 2.4 s |
-| FFT floor, CPU | 3.5 GiB | — | — | — | 26.4 s |
+| CPU | 17.9 GiB | — | 57.6 s | 268.4 s | 76.1 s |
+| CUDA | 13.3 GiB | 7.7 GiB | 14.9 s | 32.4 s | 7.4 s |
+| FFT floor, CUDA | 0.6 GiB | 3.1 GiB | — | — | 2.4 s |
+| FFT floor, CPU | 3.5 GiB | — | — | — | 22.8 s |
 
 The floor is what the transforms alone cost: `coils x rank` volumes, one
 forward and one inverse each, with the transfer multiply, the sensitivities
-and every copy taken as free. Nothing can beat it, and the apply here is 2.9x
-of it on the device and 2.3x on the host. The transfer is never resident: it is
+and every copy taken as free. Nothing can beat it, and the apply here is 3.1x
+of it on the device and 3.3x on the host. The transfer is never resident: it is
 3.1 GiB, and it stays on the host and streams.
+
+Creating it costs what it does because the parities are gridded straight onto
+the image grid rather than split off a doubled one -- eight times the
+spreading, for a build that never makes a grid larger than the image. It is
+free on the device and three times the price on the host; either way it needs
+the trajectory and the basis and none of the data, so it is built while the
+scan is still running.
 
 Regenerate with `python benchmarks/run.py` and `python benchmarks/figure.py`;
 see [`benchmarks/`](benchmarks/) for what each lane does. Runtimes are from one

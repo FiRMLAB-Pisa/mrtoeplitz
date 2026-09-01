@@ -38,10 +38,10 @@ devices:
 
 | | one unit | x 32 volumes |
 |---|---|---|
-| CUDA, padded 512³ | 82 ms | 2636 ms |
-| CUDA, parity 8x256³ | **75 ms** | **2410 ms** |
-| CPU, padded 512³ | 1633 ms | 52241 ms |
-| CPU, parity 8x256³ | **826 ms** | **26437 ms** |
+| CUDA, padded 512³ | 84 ms | 2677 ms |
+| CUDA, parity 8x256³ | **75 ms** | **2411 ms** |
+| CPU, padded 512³ | 1103 ms | 35293 ms |
+| CPU, parity 8x256³ | **711 ms** | **22758 ms** |
 
 ## Results
 
@@ -51,10 +51,10 @@ Laptop, 8 GiB.
 
 | | RAM | VRAM | `A^H y` | create | apply | vs floor |
 |---|---|---|---|---|---|---|
-| CUDA, floor | 692 MiB | 3185 MiB | — | — | 2410 ms | |
-| CUDA, mrtoeplitz | 15074 MiB | 7913 MiB | 14521 ms | 31610 ms | **6898 ms** | **2.86x** |
-| CPU, floor | 3577 MiB | — | — | — | 26437 ms | |
-| CPU, mrtoeplitz | 18068 MiB | — | 52805 ms | 89131 ms | **61131 ms** | **2.31x** |
+| CUDA, floor | 637 MiB | 3185 MiB | — | — | 2411 ms | |
+| CUDA, mrtoeplitz | 13667 MiB | 7930 MiB | 14883 ms | 32419 ms | **7419 ms** | **3.08x** |
+| CPU, floor | 3577 MiB | — | — | — | 22758 ms | |
+| CPU, mrtoeplitz | 18329 MiB | — | 57569 ms | 268419 ms | **76148 ms** | **3.35x** |
 
 The transfer is 3.09 GiB and never resident: it is built onto the host and
 streamed for every application, which is what keeps the device figure below
@@ -86,10 +86,17 @@ tightening it brings them together: 2.6e-03 apart at the default tolerance
 and 7.7e-05 at a tight one, which is what `tests/test_subspace.py` asserts.
 
 It is also eight times the spreading, because every component spreads every
-sample. At 256³ that is 33.8 s against 23.7 s and 7.19 GiB of device occupancy
-against 8.00 -- slower, for room that is not yet needed. The default is
-`"auto"`, which takes it only once the doubled grid and its working grid no
-longer fit, and on an 8 GiB card that is at 384³.
+sample, and what that costs depends entirely on the device. On CUDA it is free
+-- 32.4 s against 31.6 -- because the spreading was never what the build spent
+its time on there. On the host it is three times the price, 268 s against 89.
+
+It is the default anyway. A transfer needs the trajectory and the basis and
+none of the data, so it is built while the scan is still running, and what it
+buys is a build whose largest grid is the image: Torch's reserve peaks at 6.09
+GiB against 7.20, and past about 384³ the doubled grid and the grid a transform
+spreads onto do not fit at all. `decomposed_build=False` takes the doubled
+path, and `"auto"` takes it only where the doubled grid would not fit -- which
+is what a host-side build wants.
 
 `A^H y` is not part of the package. It lives in `lane_mrtoeplitz.py` because a
 benchmark needs somewhere to start, and it will move into a reconstruction API

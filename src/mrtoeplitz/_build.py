@@ -43,7 +43,6 @@ from ._psf import (
     _UPSAMPLING,
     gridding_streams,
     psf_plan,
-    psf_plans,
     within_psf_plans,
 )
 
@@ -605,10 +604,17 @@ def _decomposed_pair_transfers(
     dropped = 0.0
     components = []
 
+    # One buffer for the shifted coordinates and one mask for what falls
+    # outside the support, both reused by every parity.
+    shifted = samples.clone()
+    outside = None
+    if int(prod(image_shape)) > lookup.numel():
+        outside = torch.ones(prod(image_shape), dtype=torch.bool, device=device)
+        outside[lookup.to(torch.int64)] = False
+
     for parity in product((0, 1), repeat=ndim):
         # A parity is a shift of half a doubled-grid cell, and the fold onto
         # the image grid is what the transfer at that shift sums.
-        shifted = samples.clone()
         factor = torch.ones(samples.shape[0], dtype=torch.complex64, device=device)
         for axis, bit in enumerate(parity):
             size = image_shape[axis]
@@ -621,9 +627,20 @@ def _decomposed_pair_transfers(
             factor.mul_(fold.to(torch.complex64)).mul_(offset.to(torch.complex64))
         sign = float((-1) ** sum(parity))
 
-        with psf_plans():
-            plan = psf_plan(image_shape, shifted, tolerance)
-            rows = torch.empty((n_pairs, lookup.numel()), dtype=row_dtype, device="cpu")
+        rows = torch.empty((n_pairs, lookup.numel()), dtype=row_dtype, device="cpu")
+        # A pair's component leaves for the host while the next is gridded, on
+        # the same pair of streams the doubled build stages through.
+        ring = _staging_ring(lookup.numel(), row_dtype, device.type == "cuda")
+        compute, staging = (
+            gridding_streams(device) if ring is not None else (None, None)
+        )
+        pending: list[tuple[Any, int] | None] = [None, None]
+        # The parities differ only in where the samples sit, so one plan serves
+        # them all: setpts retargets it for a fraction of what making it costs,
+        # and what making it costs is half a gigabyte that destroying it does
+        # not give back.
+        plan = psf_plan(image_shape, shifted, tolerance, streamed=ring is not None)
+        with _on_stream(compute):
             for pair in range(n_pairs):
                 values = torch.repeat_interleave(coefficients[pair], repeats)
                 if weights is not None:
@@ -633,26 +650,40 @@ def _decomposed_pair_transfers(
                 del values
                 torch.fft.fftn(psf, dim=tuple(range(ndim)), out=psf)
                 flat = psf.reshape(-1)
-                if lookup.numel() < flat.numel():
-                    dropped = max(dropped, _largest_outside(flat, lookup))
+                if outside is not None:
+                    dropped = max(dropped, _largest_outside(flat, outside))
                 selected = torch.index_select(flat, 0, lookup)
                 selected.mul_(sign * scale)
-                rows[pair].copy_(selected.real if not keep_complex else selected)
-                del psf, flat, selected
+                row = selected.real if not keep_complex else selected
+                if ring is None:
+                    rows[pair].copy_(row)
+                    del psf, flat, row, selected
+                    continue
+                slot = pair % len(ring)
+                _land(rows, ring, pending, slot)
+                staging.wait_stream(compute)
+                with torch.cuda.stream(staging):
+                    ring[slot].copy_(row, non_blocking=True)
+                    arrived = torch.cuda.Event()
+                    arrived.record(staging)
+                selected.record_stream(staging)
+                pending[slot] = (arrived, pair)
+                del psf, flat, row, selected
+            for slot in range(0 if ring is None else len(ring)):
+                _land(rows, ring, pending, slot)
+        if compute is not None:
+            torch.cuda.current_stream(device).wait_stream(compute)
         components.append(rows)
-        del factor, shifted
+        del factor
     return components, dropped
 
 
-def _largest_outside(flat: Any, kept: Any) -> float:
-    """Return the largest magnitude of ``flat`` away from ``kept``.
+def _largest_outside(flat: Any, outside: Any) -> float:
+    """Return the largest magnitude of ``flat`` where ``outside`` is set.
 
     Marked rather than gathered, and walked in pieces: the grid this reduces
     over is the one the build exists to avoid holding copies of.
     """
-    torch = import_module("torch")
-    outside = torch.ones(flat.numel(), dtype=torch.bool, device=flat.device)
-    outside[kept.to(torch.int64)] = False
     largest = 0.0
     for start in range(0, flat.numel(), _SCAN_CHUNK):
         stop = min(start + _SCAN_CHUNK, flat.numel())

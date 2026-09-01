@@ -331,7 +331,9 @@ def test_the_decomposed_build_is_the_same_operator(radial):
             trajectory,
             basis,
             (16, 16),
-            options=mt.toeplitz_options(gridding_tolerance=tolerance),
+            options=mt.toeplitz_options(
+                gridding_tolerance=tolerance, decomposed_build=False
+            ),
         )
         parities = mt.subspace_kernel(
             trajectory,
