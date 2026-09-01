@@ -2212,11 +2212,18 @@ class CompactToeplitzKernel:
                     streams[slot].synchronize()
                     pending[slot] = False
 
+            # The forward half left this full, so it is cleared once. After
+            # that the inverse transform answers elsewhere and leaves it as the
+            # scatter did -- the support and zeroes -- so refreshing the
+            # support is the whole of what the next pass needs.
+            cleared = False
             for position in range(held):
                 coil_map = sensitivity(first + position).conj()
                 for coefficient in range(rank):
                     flat = padded.flatten(start_dim=1)
-                    flat.zero_()
+                    if not cleared:
+                        flat.zero_()
+                        cleared = True
                     flat.index_copy_(
                         1,
                         scatter_index,
