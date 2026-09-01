@@ -2161,13 +2161,17 @@ class CompactToeplitzKernel:
                     if not fills_padded:
                         padded.zero_()
                     torch.mul(image[:, coefficient], coil_map, out=padded[image_slices])
-                    torch.fft.fftn(padded, dim=axes, out=padded)
+                    # Out of place, and it costs nothing to be: a transform
+                    # told to write where it reads allocates a workspace of the
+                    # same volume anyway, and is a third slower for it.
+                    spectrum = torch.fft.fftn(padded, dim=axes)
                     torch.index_select(
-                        padded.flatten(start_dim=1),
+                        spectrum.flatten(start_dim=1),
                         1,
                         indices_device,
                         out=spectra[position][:, coefficient],
                     )
+                    del spectrum
                 del coil_map
 
             # The batch axis the fused multiply grids over is what carries the
@@ -2218,14 +2222,15 @@ class CompactToeplitzKernel:
                         scatter_index,
                         spectra[position][:, coefficient],
                     )
-                    torch.fft.ifftn(padded, dim=axes, out=padded, norm="forward")
-                    window = padded[image_slices]
+                    inverse = torch.fft.ifftn(padded, dim=axes, norm="forward")
+                    window = inverse[image_slices]
                     if window.device == result.device:
                         # One pass that multiplies and accumulates, rather than
                         # a product to hold and then add.
                         result[:, coefficient].addcmul_(window, coil_map)
                     else:
                         result[:, coefficient] += (window * coil_map).to(result.device)
+                    del inverse, window
                 del coil_map
 
         return result
