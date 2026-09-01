@@ -50,6 +50,11 @@ from ._psf import (
 #: it. Small enough that the temporary is nothing beside the grid itself.
 _SCAN_CHUNK = 1 << 24
 
+#: How many samples are given a per-sample weight at once. An acquisition has
+#: tens of millions of them and a weight is complex, so the exponentials that
+#: build one are worth more than the samples they are read from.
+_SAMPLE_CHUNK = 1 << 22
+
 #: Public name for the options validator.
 toeplitz_options = _toeplitz_options
 
@@ -548,6 +553,35 @@ def _land(packed: Any, ring: list[Any], pending: list[Any], slot: int) -> None:
     pending[slot] = None
 
 
+def _joined(pieces: Sequence[Any]) -> Any:
+    """Return the pieces as one array, without copying what already is one.
+
+    A scan whose frames each carry their own trajectory arrives as one array
+    and leaves this as a list of views onto it, in order. Concatenating those
+    is a second copy of the trajectory, which for a three-dimensional
+    acquisition is most of a gigabyte the build then holds beside the original.
+    """
+    torch = import_module("torch")
+    if len(pieces) == 1:
+        return pieces[0]
+    first = pieces[0]
+    width = first.shape[1]
+    stride = first.element_size() * width
+    expected = first.data_ptr()
+    for piece in pieces:
+        if (
+            not piece.is_contiguous()
+            or piece.dtype is not first.dtype
+            or piece.device != first.device
+            or piece.shape[1] != width
+            or piece.data_ptr() != expected
+        ):
+            return torch.cat(pieces)
+        expected += piece.shape[0] * stride
+    rows = sum(piece.shape[0] for piece in pieces)
+    return first.as_strided((rows, width), first.stride())
+
+
 def _decomposed_pair_transfers(
     blocks: Sequence[tuple[Any, Any, Any]],
     image_shape: tuple[int, ...],
@@ -615,16 +649,29 @@ def _decomposed_pair_transfers(
     for parity in product((0, 1), repeat=ndim):
         # A parity is a shift of half a doubled-grid cell, and the fold onto
         # the image grid is what the transfer at that shift sums.
-        factor = torch.ones(samples.shape[0], dtype=torch.complex64, device=device)
-        for axis, bit in enumerate(parity):
-            size = image_shape[axis]
-            column = samples[:, axis]
-            shifted[:, axis] = column - bit / (2 * size)
-            fold = torch.exp(-2j * torch.pi * size * column) + float((-1) ** bit)
-            # A gridding answers centred modes and the fold wants them from
-            # zero, which is one more phase on the sample.
-            offset = torch.exp(1j * torch.pi * size * shifted[:, axis])
-            factor.mul_(fold.to(torch.complex64)).mul_(offset.to(torch.complex64))
+        # Walked in pieces. Each axis needs a complex exponential over every
+        # sample and there are two of them, so held whole they are several
+        # times the coordinates they are read from.
+        factor = torch.empty(samples.shape[0], dtype=torch.complex64, device=device)
+        for start in range(0, samples.shape[0], _SAMPLE_CHUNK):
+            stop = min(start + _SAMPLE_CHUNK, samples.shape[0])
+            piece = torch.ones(stop - start, dtype=torch.complex64, device=device)
+            for axis, bit in enumerate(parity):
+                size = image_shape[axis]
+                column = samples[start:stop, axis]
+                moved = column - bit / (2 * size)
+                shifted[start:stop, axis] = moved
+                fold = torch.polar(
+                    torch.ones_like(column), -2 * torch.pi * size * column
+                )
+                fold.add_(float((-1) ** bit))
+                piece.mul_(fold)
+                # A gridding answers centred modes and the fold wants them from
+                # zero, which is one more phase on the sample.
+                piece.mul_(torch.polar(torch.ones_like(moved), torch.pi * size * moved))
+                del fold, moved
+            factor[start:stop] = piece
+            del piece
         sign = float((-1) ** sum(parity))
 
         rows = torch.empty((n_pairs, lookup.numel()), dtype=row_dtype, device="cpu")
@@ -789,7 +836,6 @@ def _subspace_kernel_from_blocks(
     products summed over the frames sharing it, ordered as
     ``torch.triu_indices(rank, rank)`` gives the pairs.
     """
-    torch = import_module("torch")
     options = _toeplitz_options() if options is None else options
     if not blocks:
         raise ValueError("a subspace kernel needs at least one trajectory block")
@@ -807,7 +853,7 @@ def _subspace_kernel_from_blocks(
     # samples and needing none of their transfers -- so it is known before the
     # first one is gridded, and each can be cut as it comes.
     counts = [as_torch(block[0]).reshape(-1, ndim).shape[0] for block in blocks]
-    samples = torch.cat([as_torch(block[0]).reshape(-1, ndim) for block in blocks])
+    samples = _joined([as_torch(block[0]).reshape(-1, ndim) for block in blocks])
     coefficients = as_torch(blocks[0][2])
     stripped = [(None, block[1], block[2]) for block in blocks]
     # The support is read where the gridding happens. A policy puts the
