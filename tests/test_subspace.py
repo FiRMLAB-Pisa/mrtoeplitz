@@ -310,3 +310,45 @@ def test_a_build_does_not_keep_its_gridding_plan(rotated):
     masks = (rng.random((4, *shape)) < 0.5).astype(np.float32)
     mt.cartesian_subspace_kernel(masks, basis, options=SINGLE)
     assert not _psf._PLAN_SLOT
+
+
+def test_the_decomposed_build_is_the_same_operator(radial):
+    """Gridding the parities directly, rather than splitting a doubled grid.
+
+    The doubled-grid transfer read where the coordinates are congruent to a
+    parity is a transfer over the image grid, so it can be gridded there and
+    the doubled grid never made. That is the same operator, and it has to
+    answer as one: what separates them is the gridding, so tightening the
+    gridding has to bring them together.
+    """
+    torch.manual_seed(0)
+    trajectory = torch.as_tensor(radial(n_spokes=48, n_samples=64))
+    basis = torch.linalg.qr(torch.randn(48, 2))[0]
+    image = torch.randn(1, 2, 16, 16, dtype=torch.complex64)
+
+    def disagreement(tolerance):
+        doubled = mt.subspace_kernel(
+            trajectory,
+            basis,
+            (16, 16),
+            options=mt.toeplitz_options(gridding_tolerance=tolerance),
+        )
+        parities = mt.subspace_kernel(
+            trajectory,
+            basis,
+            (16, 16),
+            options=mt.toeplitz_options(
+                gridding_tolerance=tolerance, decomposed_build=True
+            ),
+        )
+        left, right = doubled(image), parities(image)
+        return float(
+            torch.linalg.vector_norm(left - right) / torch.linalg.vector_norm(left)
+        )
+
+    loose, tight = disagreement(1e-3), disagreement(1e-9)
+    # Converging is the invariant. The floor is the oversampling the plans are
+    # made at, not the tolerance they are asked for, so the tight figure is a
+    # property of that and not of the decomposition.
+    assert tight < loose / 10
+    assert tight < 1e-4

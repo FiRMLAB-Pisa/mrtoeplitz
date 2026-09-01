@@ -19,6 +19,7 @@ def _toeplitz_options(
     cuda_max_device_fraction: float = 0.85,
     cuda_transfer_precision: str = "auto",
     gridding_tolerance: float | None = None,
+    decomposed_build: bool | str = "auto",
 ) -> dict[str, Any]:
     """Validate how a Toeplitz kernel is applied.
 
@@ -52,6 +53,12 @@ def _toeplitz_options(
     magnitude larger than what the gridding does. A build that keeps the whole
     transfer -- ``compress=False`` -- has no such margin and should ask for a
     tighter one.
+
+    ``decomposed_build`` grids those components straight onto the image grid
+    rather than making the doubled grid and splitting it afterwards. It is the
+    same operator, and it is eight times the spreading -- every component
+    spreads every sample -- so ``"auto"`` takes it only when the doubled grid
+    is what will not fit.
 
     ``polyphase`` files the transfer as one component per parity of the
     doubled grid's coordinates, so the convolution runs on the image grid and
@@ -88,6 +95,7 @@ def _toeplitz_options(
         "cuda_max_device_fraction": float(cuda_max_device_fraction),
         "cuda_transfer_precision": cuda_transfer_precision,
         "gridding_tolerance": gridding_tolerance,
+        "decomposed_build": decomposed_build,
     }
 
 

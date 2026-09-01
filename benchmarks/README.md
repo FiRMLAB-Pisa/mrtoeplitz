@@ -74,6 +74,23 @@ two for the build -- the same build has measured 16 to 45 seconds at a smaller
 sample count -- so the memory is the part to trust. The apply is the stable
 one, and it is the phase a solve repeats.
 
+## Building the transfer without the doubled grid
+
+Gridding onto the doubled grid needs that grid and the larger one the
+transform spreads onto -- 3.2 GiB between them at 256³, and past about 384³
+they no longer fit at all. `decomposed_build` grids each parity component
+straight onto the image grid instead, so neither is ever made.
+
+It is the same operator. What separates the two is the gridding, and
+tightening it brings them together: 2.6e-03 apart at the default tolerance
+and 7.7e-05 at a tight one, which is what `tests/test_subspace.py` asserts.
+
+It is also eight times the spreading, because every component spreads every
+sample. At 256³ that is 33.8 s against 23.7 s and 7.19 GiB of device occupancy
+against 8.00 -- slower, for room that is not yet needed. The default is
+`"auto"`, which takes it only once the doubled grid and its working grid no
+longer fit, and on an 8 GiB card that is at 384³.
+
 `A^H y` is not part of the package. It lives in `lane_mrtoeplitz.py` because a
 benchmark needs somewhere to start, and it will move into a reconstruction API
 rather than this one.

@@ -27,6 +27,7 @@ __all__ = [
 from collections.abc import Sequence
 from contextlib import nullcontext, suppress
 from importlib import import_module
+from itertools import product
 from math import isqrt, prod
 from typing import Any
 
@@ -34,10 +35,17 @@ from ._kernel import (
     CompactToeplitzKernel,
     PolyphaseToeplitzKernel,
     as_torch,
+    decoded_positions,
     polyphase_components,
 )
 from ._options import _support_locations, _toeplitz_options
-from ._psf import gridding_streams, psf_plan, within_psf_plans
+from ._psf import (
+    _UPSAMPLING,
+    gridding_streams,
+    psf_plan,
+    psf_plans,
+    within_psf_plans,
+)
 
 #: How much of a grid a scan walks at once when it only needs a reduction of
 #: it. Small enough that the temporary is nothing beside the grid itself.
@@ -541,6 +549,200 @@ def _land(packed: Any, ring: list[Any], pending: list[Any], slot: int) -> None:
     pending[slot] = None
 
 
+def _decomposed_pair_transfers(
+    blocks: Sequence[tuple[Any, Any, Any]],
+    image_shape: tuple[int, ...],
+    samples: Any,
+    counts: Sequence[int],
+    shared: Any,
+    *,
+    keep_complex: bool = True,
+    tolerance: float | None = None,
+) -> tuple[list[Any], float]:
+    """Grid every parity component of the transfer onto the image grid.
+
+    The doubled-grid transfer read at the locations whose coordinates are
+    congruent to a parity is itself a transfer over the image grid: the point
+    spread function folded onto that grid, modulated by the half cell the
+    parity stands for. Both are weights on the samples, so each component is a
+    gridding onto the image grid and the doubled grid is never made -- which is
+    what the build costs most, and what stops it fitting at higher resolutions.
+
+    It is the same operator the doubled build produces, to what the gridding
+    resolves. It is also eight times the spreading, since every component
+    spreads every sample, so it is worth taking only when the doubled grid is
+    the binding constraint.
+
+    Returns the components in parity order and the largest value left out.
+    """
+    torch = import_module("torch")
+    ndim = len(image_shape)
+    device = samples.device
+    doubled = tuple(2 * size for size in image_shape)
+    n_pairs = int(blocks[0][2].numel())
+    row_dtype = torch.complex64 if keep_complex else torch.float32
+
+    weights = None
+    if any(block[1] is not None for block in blocks):
+        pieces = []
+        for (_, density, _), count in zip(blocks, counts, strict=True):
+            if density is None:
+                pieces.append(torch.ones(count, device=device))
+                continue
+            piece = as_torch(density).reshape(-1).to(device)
+            if piece.numel() != count:
+                raise ValueError("density and samples must have the same length")
+            pieces.append(piece)
+        weights = torch.cat(pieces).to(torch.complex64)
+    repeats = torch.tensor(counts, device=device)
+    coefficients = torch.stack([block[2] for block in blocks], dim=1).to(
+        device=device, dtype=torch.complex64
+    )
+    # The convolution runs on the doubled grid, so that grid's size is the
+    # whole normalization, whichever grid the components were made on.
+    scale = 1.0 / prod(doubled)
+    lookup = shared.to(device=device, dtype=torch.int32)
+    dropped = 0.0
+    components = []
+
+    for parity in product((0, 1), repeat=ndim):
+        # A parity is a shift of half a doubled-grid cell, and the fold onto
+        # the image grid is what the transfer at that shift sums.
+        shifted = samples.clone()
+        factor = torch.ones(samples.shape[0], dtype=torch.complex64, device=device)
+        for axis, bit in enumerate(parity):
+            size = image_shape[axis]
+            column = samples[:, axis]
+            shifted[:, axis] = column - bit / (2 * size)
+            fold = torch.exp(-2j * torch.pi * size * column) + float((-1) ** bit)
+            # A gridding answers centred modes and the fold wants them from
+            # zero, which is one more phase on the sample.
+            offset = torch.exp(1j * torch.pi * size * shifted[:, axis])
+            factor.mul_(fold.to(torch.complex64)).mul_(offset.to(torch.complex64))
+        sign = float((-1) ** sum(parity))
+
+        with psf_plans():
+            plan = psf_plan(image_shape, shifted, tolerance)
+            rows = torch.empty((n_pairs, lookup.numel()), dtype=row_dtype, device="cpu")
+            for pair in range(n_pairs):
+                values = torch.repeat_interleave(coefficients[pair], repeats)
+                if weights is not None:
+                    values.mul_(weights)
+                values.mul_(factor)
+                psf = plan.grid(values.reshape(1, 1, -1)).reshape(image_shape)
+                del values
+                torch.fft.fftn(psf, dim=tuple(range(ndim)), out=psf)
+                flat = psf.reshape(-1)
+                if lookup.numel() < flat.numel():
+                    dropped = max(dropped, _largest_outside(flat, lookup))
+                selected = torch.index_select(flat, 0, lookup)
+                selected.mul_(sign * scale)
+                rows[pair].copy_(selected.real if not keep_complex else selected)
+                del psf, flat, selected
+        components.append(rows)
+        del factor, shifted
+    return components, dropped
+
+
+def _largest_outside(flat: Any, kept: Any) -> float:
+    """Return the largest magnitude of ``flat`` away from ``kept``.
+
+    Marked rather than gathered, and walked in pieces: the grid this reduces
+    over is the one the build exists to avoid holding copies of.
+    """
+    torch = import_module("torch")
+    outside = torch.ones(flat.numel(), dtype=torch.bool, device=flat.device)
+    outside[kept.to(torch.int64)] = False
+    largest = 0.0
+    for start in range(0, flat.numel(), _SCAN_CHUNK):
+        stop = min(start + _SCAN_CHUNK, flat.numel())
+        piece = flat[start:stop].abs()
+        piece.mul_(outside[start:stop])
+        largest = max(largest, float(piece.max()))
+    return largest
+
+
+def _decomposed_wanted(
+    options: dict[str, Any],
+    spatial_shape: tuple[int, ...],
+    reference: Any,
+) -> bool:
+    """Whether to grid the parities directly rather than make the doubled grid.
+
+    Asked for outright, or judged by what the device can hold. Gridding onto
+    the doubled grid needs that grid and the working one the transform spreads
+    onto, and past a resolution the two no longer fit; the parities need
+    neither, at eight times the spreading.
+    """
+    setting = options.get("decomposed_build", "auto")
+    if setting != "auto":
+        return bool(setting)
+    torch = import_module("torch")
+    device = getattr(reference, "device", None)
+    if getattr(device, "type", None) != "cuda":
+        return False
+    # The grid the transform answers on, and the one it spreads onto.
+    wanted = (1 + _UPSAMPLING ** len(spatial_shape)) * prod(spatial_shape) * 8
+    total = torch.cuda.get_device_properties(device).total_memory
+    return wanted > options["cuda_max_device_fraction"] * total
+
+
+def _decomposed_kernel(
+    blocks: Sequence[tuple[Any, Any, Any]],
+    image_shape: tuple[int, ...],
+    samples: Any,
+    counts: Sequence[int],
+    indices: Any,
+    rank: int,
+    *,
+    options: dict[str, Any],
+    keep_complex: bool,
+    dtype: Any,
+    streaming: Any | None,
+) -> Any:
+    """Build the transfer as its parity components, without the doubled grid."""
+    torch = import_module("torch")
+    ndim = len(image_shape)
+    spatial_shape = tuple(2 * size for size in image_shape)
+    position, _ = decoded_positions(indices, spatial_shape, image_shape)
+    shared = torch.unique(position)
+    del position
+    components, dropped = _decomposed_pair_transfers(
+        blocks,
+        image_shape,
+        samples,
+        counts,
+        shared,
+        keep_complex=keep_complex,
+        tolerance=options["gridding_tolerance"],
+    )
+    settings: dict[str, Any] = {
+        "image_shape": image_shape,
+        "chunk_size": options["chunk_size"],
+        "cuda_mode": options["cuda_mode"],
+        "cuda_max_device_fraction": options["cuda_max_device_fraction"],
+        "cuda_transfer_precision": options["cuda_transfer_precision"],
+    }
+    where = shared.to(device="cpu" if streaming is not None else shared.device)
+    where = where.to(torch.int32)
+    parts = [
+        (
+            parity,
+            CompactToeplitzKernel(
+                rows.to(dtype) if keep_complex else rows.real.to(dtype),
+                where,
+                image_shape,
+                rank,
+                **settings,
+            ),
+        )
+        for parity, rows in zip(product((0, 1), repeat=ndim), components, strict=True)
+    ]
+    filed = PolyphaseToeplitzKernel(parts, image_shape, rank, truncation_bound=dropped)
+    filed.streaming = streaming
+    return filed
+
+
 def _subspace_kernel_from_blocks(
     blocks: Sequence[tuple[Any, Any, Any]],
     image_shape: tuple[int, ...],
@@ -586,6 +788,19 @@ def _subspace_kernel_from_blocks(
         samples.device,
         options["compress"],
     )
+    if _decomposed_wanted(options, spatial_shape, samples):
+        return _decomposed_kernel(
+            stripped,
+            image_shape,
+            samples,
+            counts,
+            indices,
+            rank,
+            options=options,
+            keep_complex=bool(coefficients.is_complex()),
+            dtype=coefficients.dtype,
+            streaming=streaming,
+        )
     packed, dropped = _subspace_pair_transfers(
         stripped,
         image_shape,

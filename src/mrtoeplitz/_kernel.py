@@ -6,6 +6,7 @@ __all__ = [
     "CompactToeplitzKernel",
     "PolyphaseToeplitzKernel",
     "as_torch",
+    "decoded_positions",
     "support_indices",
 ]
 
@@ -383,25 +384,35 @@ def occupancy_indices(
     return torch.nonzero(keep.reshape(-1), as_tuple=False).flatten().to(torch.int32)
 
 
-def polyphase_components(
-    values: Any,
+def decoded_positions(
     indices: Any,
     spatial_shape: tuple[int, ...],
     image_shape: tuple[int, ...],
-) -> list[tuple[tuple[int, ...], Any, Any]]:
-    """Split a doubled-grid transfer by the parity of its coordinates.
+) -> tuple[Any, Any]:
+    """Where doubled-grid locations sit on the image grid, and their parity.
 
-    Returns ``(parity, values, indices)`` per component, the indices being
-    positions on the image grid rather than the doubled one.
+    Decoded a piece at a time and into the narrowest types that hold the
+    answer: an image-grid position is int32 and a parity is one of ``2**ndim``,
+    where the coordinates they are read from are int64 and there is one per
+    axis. Held whole those are several times the transfer they describe.
+
+    Parameters
+    ----------
+    indices
+        Flat locations on the doubled grid.
+    spatial_shape
+        The doubled grid.
+    image_shape
+        The image grid its parities live on.
+
+    Returns
+    -------
+    tuple
+        The image-grid position of each location, and which parity it is.
     """
     torch = _torch()
     ndim = len(spatial_shape)
     flat = as_torch(indices)
-    # Where each location sits on the image grid, and which parity it is.
-    # Decoded a piece at a time and into the narrowest types that hold the
-    # answer: an image-grid position is int32 and a parity is one of 2**ndim,
-    # where the coordinates they are read from are int64 and there is one per
-    # axis. Held whole those are several times the transfer they describe.
     position = torch.empty(flat.numel(), dtype=torch.int32, device=flat.device)
     identity = torch.empty(flat.numel(), dtype=torch.int8, device=flat.device)
     for start in range(0, flat.numel(), _DECODE_CHUNK):
@@ -419,6 +430,23 @@ def polyphase_components(
             bit *= 2
         position[start:stop] = piece.to(torch.int32)
         identity[start:stop] = parity.to(torch.int8)
+    return position, identity
+
+
+def polyphase_components(
+    values: Any,
+    indices: Any,
+    spatial_shape: tuple[int, ...],
+    image_shape: tuple[int, ...],
+) -> list[tuple[tuple[int, ...], Any, Any]]:
+    """Split a doubled-grid transfer by the parity of its coordinates.
+
+    Returns ``(parity, values, indices)`` per component, the indices being
+    positions on the image grid rather than the doubled one.
+    """
+    torch = _torch()
+    ndim = len(spatial_shape)
+    position, identity = decoded_positions(indices, spatial_shape, image_shape)
 
     values = as_torch(values)
     # Every component is stored over the same locations -- the union of what
