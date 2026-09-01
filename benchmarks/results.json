@@ -4,17 +4,17 @@
     "lane": "floor",
     "device": "cuda",
     "seconds": {
-      "apply": 2.4111764159984888,
-      "apply_padded": 2.6770784832013304,
-      "apply_parity": 2.4111764159984888
+      "apply": 2.4127643983927554,
+      "apply_padded": 2.53902812320739,
+      "apply_parity": 2.4127643983927554
     },
     "extra": {
-      "one_padded_pair": 0.08365870260004157,
-      "one_parity_set": 0.07534926299995277,
+      "one_padded_pair": 0.07934462885023094,
+      "one_parity_set": 0.0753988874497736,
       "volumes": 32.0
     },
-    "peak_host": 668307456,
-    "peak_device": 3339714560,
+    "peak_host": 655200256,
+    "peak_device": 3341811712,
     "failed": null
   },
   {
@@ -22,15 +22,15 @@
     "lane": "mrtoeplitz",
     "device": "cuda",
     "seconds": {
-      "adjoint": 14.882836421998945,
-      "create": 32.418608215997665,
-      "apply": 7.418959022665756
+      "adjoint": 16.291358084999956,
+      "create": 37.24610894200305,
+      "apply": 9.00273334633433
     },
     "extra": {
       "transfer_bytes": 3313226752.0
     },
-    "peak_host": 14331215872,
-    "peak_device": 8315207680,
+    "peak_host": 14326595584,
+    "peak_device": 7817134080,
     "failed": null
   },
   {
@@ -38,17 +38,17 @@
     "lane": "floor",
     "device": "cpu",
     "seconds": {
-      "apply": 22.75749613599619,
-      "apply_padded": 35.29246982719633,
-      "apply_parity": 22.75749613599619
+      "apply": 32.744674123195,
+      "apply_padded": 51.49666239840444,
+      "apply_parity": 32.744674123195
     },
     "extra": {
-      "one_padded_pair": 1.1028896820998852,
-      "one_parity_set": 0.7111717542498809,
+      "one_padded_pair": 1.6092706999501387,
+      "one_parity_set": 1.0232710663498437,
       "volumes": 32.0
     },
-    "peak_host": 3750768640,
-    "peak_device": 0,
+    "peak_host": 3749670912,
+    "peak_device": 97517568,
     "failed": null
   },
   {
@@ -56,15 +56,15 @@
     "lane": "mrtoeplitz",
     "device": "cpu",
     "seconds": {
-      "adjoint": 57.569003705000796,
-      "create": 268.41858433699963,
-      "apply": 76.14792521933366
+      "adjoint": 50.74825291000161,
+      "create": 177.38940295000066,
+      "apply": 70.74256791233347
     },
     "extra": {
       "transfer_bytes": 3313226752.0
     },
-    "peak_host": 19219197952,
-    "peak_device": 1414529024,
+    "peak_host": 19386564608,
+    "peak_device": 0,
     "failed": null
   }
 ]

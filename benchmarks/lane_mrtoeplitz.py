@@ -188,10 +188,12 @@ def main() -> None:
     seconds["create"] = clock() - start
     extra = {"transfer_bytes": float(kernel.storage_nbytes)}
 
-    # Building on the device leaves the gridding plan's blocks in the caching
-    # allocator. They are free, but Torch will not give them back to the
-    # driver on its own, and at this size the apply needs them: without this
-    # it runs several times slower purely for want of room.
+    # The trajectory and the density built the transfer and are not read
+    # again; on this grid they are more than a gigabyte of the card, and an
+    # apply that has to work around them runs half as fast again. Building on
+    # the device also leaves the gridding plan's blocks in the caching
+    # allocator, which Torch will not give back on its own.
+    del trajectory, density
     if arguments.device == "cuda":
         torch.cuda.empty_cache()
 

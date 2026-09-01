@@ -636,16 +636,22 @@ class PolyphaseToeplitzKernel:
             phase = self._phase(parity, image)
             if phase is None:
                 part = run(kernel, image)
-            else:
-                if staged is None:
-                    staged = torch.empty_like(image)
-                torch.mul(image, phase, out=staged)
-                part = run(kernel, staged)
-                part.mul_(phase.conj())
+                if result is None:
+                    result = part
+                else:
+                    result.add_(part)
+                    del part
+                continue
+            if staged is None:
+                staged = torch.empty_like(image)
+            torch.mul(image, phase, out=staged)
+            part = run(kernel, staged)
             if result is None:
-                result = part
+                result = part.mul_(phase.conj())
             else:
-                result.add_(part)
+                # Taking the phase off and adding are one pass over the volume,
+                # not two.
+                result.addcmul_(part, phase.conj())
                 del part
         assert result is not None
         return result.div_(float(2 ** len(self.image_shape)))
@@ -2102,6 +2108,7 @@ class CompactToeplitzKernel:
             slice(None),
             *(slice(0, size) for size in self.image_shape),
         )
+        fills_padded = self.spatial_shape == self.image_shape
         indices_device = self.indices.to(device, dtype=torch.int32)
         scatter_index = indices_device.to(torch.int64)
         padded = torch.empty(
@@ -2147,10 +2154,13 @@ class CompactToeplitzKernel:
             for position in range(held):
                 coil_map = sensitivity(first + position)
                 for coefficient in range(rank):
-                    padded.zero_()
-                    window = padded[image_slices]
-                    window.copy_(image[:, coefficient])
-                    window.mul_(coil_map)
+                    # The coil multiply writes the buffer rather than reading
+                    # it back twice, and there is nothing to clear when the
+                    # image fills it -- which it does for every component of a
+                    # transfer filed by parity.
+                    if not fills_padded:
+                        padded.zero_()
+                    torch.mul(image[:, coefficient], coil_map, out=padded[image_slices])
                     torch.fft.fftn(padded, dim=axes, out=padded)
                     torch.index_select(
                         padded.flatten(start_dim=1),
@@ -2209,8 +2219,13 @@ class CompactToeplitzKernel:
                         spectra[position][:, coefficient],
                     )
                     torch.fft.ifftn(padded, dim=axes, out=padded, norm="forward")
-                    combined = padded[image_slices] * coil_map
-                    result[:, coefficient] += combined.to(result.device)
+                    window = padded[image_slices]
+                    if window.device == result.device:
+                        # One pass that multiplies and accumulates, rather than
+                        # a product to hold and then add.
+                        result[:, coefficient].addcmul_(window, coil_map)
+                    else:
+                        result[:, coefficient] += (window * coil_map).to(result.device)
                 del coil_map
 
         return result
