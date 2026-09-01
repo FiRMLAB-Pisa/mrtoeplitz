@@ -102,15 +102,16 @@ both devices, agreeing to `4e-4`, which is what the gridding tolerance allows.
 
 | | RAM | VRAM | `A^H y` | kernel creation | kernel apply |
 |---|---|---|---|---|---|
-| CPU | 17.9 GiB | — | 57.6 s | 268.4 s | 76.1 s |
-| CUDA | 13.3 GiB | 7.7 GiB | 14.9 s | 32.4 s | 7.4 s |
-| FFT floor, CUDA | 0.6 GiB | 3.1 GiB | — | — | 2.4 s |
-| FFT floor, CPU | 3.5 GiB | — | — | — | 22.8 s |
+| CPU | 17.8 GiB | — | 56.5 s | 181.6 s | 76.4 s |
+| CUDA | 13.3 GiB | 7.5 GiB | 16.7 s | 38.5 s | 6.9 s |
+| FFT floor, CUDA | 0.6 GiB | 3.3 GiB | — | — | 2.6 s |
+| FFT floor, CPU | 3.5 GiB | — | — | — | 24.0 s |
 
 The floor is what the transforms alone cost: `coils x rank` volumes, one
 forward and one inverse each, with the transfer multiply, the sensitivities
-and every copy taken as free. Nothing can beat it, and the apply here is 3.1x
-of it on the device and 3.3x on the host. The transfer is never resident: it is
+and every copy taken as free. Nothing can beat it, and the apply here is 2.6x
+of it on the device and 3.2x on the host -- and the transforms inside it are
+at the floor, so what is left of the difference is the work between them. The transfer is never resident: it is
 3.1 GiB, and it stays on the host and streams.
 
 Creating it costs what it does because the parities are gridded straight onto

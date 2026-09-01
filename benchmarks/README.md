@@ -38,10 +38,10 @@ devices:
 
 | | one unit | x 32 volumes |
 |---|---|---|
-| CUDA, padded 512³ | 84 ms | 2677 ms |
-| CUDA, parity 8x256³ | **75 ms** | **2411 ms** |
-| CPU, padded 512³ | 1103 ms | 35293 ms |
-| CPU, parity 8x256³ | **711 ms** | **22758 ms** |
+| CUDA, padded 512³ | 112 ms | 3582 ms |
+| CUDA, parity 8x256³ | **82 ms** | **2630 ms** |
+| CPU, padded 512³ | 1124 ms | 35953 ms |
+| CPU, parity 8x256³ | **751 ms** | **24041 ms** |
 
 ## Results
 
@@ -51,10 +51,22 @@ Laptop, 8 GiB.
 
 | | RAM | VRAM | `A^H y` | create | apply | vs floor |
 |---|---|---|---|---|---|---|
-| CUDA, floor | 637 MiB | 3185 MiB | — | — | 2411 ms | |
-| CUDA, mrtoeplitz | 13667 MiB | 7930 MiB | 14883 ms | 32419 ms | **7419 ms** | **3.08x** |
-| CPU, floor | 3577 MiB | — | — | — | 22758 ms | |
-| CPU, mrtoeplitz | 18329 MiB | — | 57569 ms | 268419 ms | **76148 ms** | **3.35x** |
+| CUDA, floor | 628 MiB | 3344 MiB | — | — | 2630 ms | |
+| CUDA, mrtoeplitz | 13613 MiB | 7691 MiB | 16670 ms | 38467 ms | **6949 ms** | **2.64x** |
+| CPU, floor | 3575 MiB | — | — | — | 24041 ms | |
+| CPU, mrtoeplitz | 18207 MiB | — | 56474 ms | 181615 ms | **76443 ms** | **3.18x** |
+
+Measured on the device, the transforms an application makes are 2.21 s against
+the floor's 2.41 -- they are the floor. What is left is the work between them:
+a multiply into the buffer the transform reads, a gather, the transfer's own
+matvec, a scatter, and a multiply that accumulates. None of those is more than
+a seventh of an application, and the largest is already one fused pass.
+
+A transform is issued out of place throughout. That is a third quicker than
+one told to write where it reads, and it costs nothing: cuFFT allocates a
+workspace of one volume either way, and out of place that volume is Torch's to
+account for rather than cuFFT's to hide. Driver occupancy through an
+application is the same to three decimals.
 
 The transfer is 3.09 GiB and never resident: it is built onto the host and
 streamed for every application, which is what keeps the device figure below
