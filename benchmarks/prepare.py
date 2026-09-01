@@ -28,7 +28,11 @@ import delics
 #: What the benchmark runs on: a rank-4 subspace over eight virtual coils.
 RANK = 4
 COILS = 8
-SHOTS = 8
+#: Every group of the six-minute acquisition. Taking a subset of them
+#: undersamples a scan that is already accelerated, and the normal operator
+#: then sits far enough from the identity that applying it to a zero-filled
+#: reconstruction amplifies the streaks rather than sharpening the object.
+SHOTS = 48
 FRAMES = 500
 
 
@@ -68,77 +72,128 @@ def _cache_path() -> Path:
     return delics.data_root() / f"prepared_r{RANK}_c{COILS}_s{SHOTS}_f{FRAMES}.npz"
 
 
-def _compress_coils(raw: np.ndarray, radius: np.ndarray) -> np.ndarray:
-    """Compress the physical channels onto ``COILS`` virtual ones.
+def _compression_matrix(centre: np.ndarray) -> np.ndarray:
+    """Return the projection of the physical channels onto ``COILS`` virtual ones.
 
-    The basis is fitted on the samples nearest k-space centre, which is where
-    the array's correlations are and where the object is brightest, and then
-    applied to everything. The covariance is channels by channels however many
-    samples there are, so it is accumulated rather than formed at once.
+    Fitted on the samples nearest k-space centre, which is where the array's
+    correlations are and where the object is brightest. Every arm is centre-out,
+    so those are the samples the readout opens with.
     """
-    channels = raw.shape[0]
-    centre = radius < 0.1 * radius.max()
+    channels = centre.shape[0]
+    flat = centre.reshape(channels, -1)
     covariance = np.zeros((channels, channels), dtype=np.complex128)
-    flat = raw.reshape(channels, -1)
-    inside = centre.reshape(-1)
     for start in range(0, flat.shape[1], 1 << 20):
         block = flat[:, start : start + (1 << 20)]
-        block = block[:, inside[start : start + (1 << 20)]]
-        if block.size:
-            covariance += block @ block.conj().T
+        covariance += block @ block.conj().T
     values, vectors = np.linalg.eigh(covariance)
     keep = vectors[:, np.argsort(-values)[:COILS]].conj().T.astype(np.complex64)
     kept = float(np.sort(values)[::-1][:COILS].sum() / values.sum())
     print(f"  {channels} channels -> {COILS}, holding {100 * kept:.1f}% of the energy")
-    return (keep @ flat).reshape(COILS, *raw.shape[1:])
+    return keep
 
 
-def _gridded(samples: np.ndarray, values: np.ndarray, size: int = 64) -> np.ndarray:
-    """A quick adjoint onto a coarse grid, for judging an ordering."""
-    import finufft
+def _gather_compressed(
+    raw: np.ndarray,
+    offset: int,
+    points: int,
+) -> np.ndarray:
+    """Read the acquisition into ``(coils, frames, shots, points)``.
 
-    points = np.ascontiguousarray(samples.reshape(-1, 3).astype(np.float64) * 2 * np.pi)
-    plan = finufft.Plan(1, (size,) * 3, isign=1, eps=1e-4, dtype="complex128")
-    plan.setpts(*[np.ascontiguousarray(points[:, axis]) for axis in range(3)])
-    return np.abs(plan.execute(values.reshape(-1).astype(np.complex128)))
-
-
-def _sharpness(image: np.ndarray) -> float:
-    """How concentrated an image is. Noise is flat; an object is not."""
-    flat = image.reshape(-1)
-    return float(flat.max() / flat.mean())
+    The raw array is a readout axis, a channel axis and one arm axis holding
+    every group of every frame, and the arm axis is the contiguous one. Taking
+    one arm at a time therefore strides the whole file per arm; taking a slab
+    of the readout at a time reads it in order instead, and the channels are
+    projected onto the virtual ones as each slab lands, so the uncompressed
+    acquisition is never held whole.
+    """
+    channels, arms = raw.shape[1], raw.shape[2]
+    slab = 64
+    keep = _compression_matrix(
+        np.ascontiguousarray(raw[offset : offset + slab].transpose(1, 0, 2))
+    )
+    kspace = np.empty((COILS, FRAMES, SHOTS, points), dtype=np.complex64)
+    for start in range(0, points, slab):
+        stop = min(start + slab, points)
+        block = np.asarray(raw[offset + start : offset + stop])
+        # The arm axis is group-major over the frames, and only the first
+        # SHOTS groups are wanted.
+        block = block.reshape(stop - start, channels, arms // FRAMES, FRAMES)
+        block = block[:, :, :SHOTS].transpose(1, 3, 2, 0)
+        kspace[..., start:stop] = (keep @ block.reshape(channels, -1)).reshape(
+            COILS, FRAMES, SHOTS, stop - start
+        )
+        print(f"  {stop}/{points} samples", end="\r", flush=True)
+    print(f"  gathered {kspace.shape}, {kspace.nbytes / 2**30:.2f} GiB")
+    return kspace
 
 
 def _resolve_layout(raw: np.ndarray, trajectory: np.ndarray) -> tuple[str, int]:
-    """Work out how the raw arms map onto the trajectory, by reconstructing.
+    """Return how the raw arms map onto the trajectory, having checked it.
 
     Neither the order of the 24000 arms nor which of the 2000 digitised
-    samples the 1688 trajectory points are is written down. Both orderings
-    produce an array of the right shape, and only one produces an image, so
-    the question is settled by gridding a few arms each way and seeing which
-    is concentrated.
+    samples carry the 1688 trajectory points is written down, and scoring a
+    reconstruction cannot settle either. A misaligned gridding puts every
+    arm's centre sample at k = 0 and scatters the rest, which is a bright
+    point at the origin surrounded by streaks -- more concentrated than any
+    image, so every metric that rewards concentration picks it.
+
+    Two properties of the acquisition settle it without reconstructing:
+
+    - The flip-angle train varies over the 500 frames and repeats for each of
+      the 48 groups, so the arm axis is periodic in the frame with period 500.
+      Averaged over the folds, folding that way leaves the train; folding
+      the other way leaves a flat line.
+    - Every arm is centre-out and the trajectory's first point is k = 0, so
+      the largest sample of a readout is its first, and the trajectory's
+      points are the leading ones of the 2000.
+
+    Returns
+    -------
+    tuple
+        The arm ordering and the sample the readout starts at.
+
+    Raises
+    ------
+    RuntimeError
+        If the data does not have the periodicity or the centre-out readout
+        this pairing assumes.
     """
-    frames, shots, points, _ = trajectory.shape
-    probe_frames = 24
-    best = ("", 0, 0.0)
-    for order in ("shot-major", "frame-major"):
-        for offset in (0, 2000 - points):
-            arms, samples = [], []
-            for frame in range(probe_frames):
-                for shot in range(shots):
-                    index = (
-                        frame * shots + shot
-                        if order == "frame-major"
-                        else shot * frames + frame
-                    )
-                    arms.append(raw[offset : offset + points, 0, index])
-                    samples.append(trajectory[frame, shot])
-            score = _sharpness(_gridded(np.stack(samples), np.stack(arms)))
-            print(f"  {order:>12}, offset {offset:>4}: sharpness {score:8.1f}")
-            if score > best[2]:
-                best = (order, offset, score)
-    print(f"  -> {best[0]}, offset {best[1]}")
-    return best[0], best[1]
+    frames, _, points, _ = trajectory.shape
+    arms = raw.shape[2]
+    if not float(np.linalg.norm(trajectory[0, 0, 0])) < 1e-3:
+        raise RuntimeError("the trajectory does not start at k = 0")
+
+    # One number per arm: how much signal its readout opens with.
+    profile = np.abs(np.asarray(raw[:40, 0, :])).mean(axis=0).astype(np.float64)
+    kept = profile[: (arms // frames) * frames]
+
+    def variation(shape: tuple[int, int]) -> float:
+        """How much the fold-averaged curve varies, relative to its level.
+
+        Averaging over the folds separates the evolution from the noise on any
+        one of them: fold on the true period and what is left is the train,
+        fold on the wrong one and it is flat.
+        """
+        curve = kept.reshape(shape).mean(axis=0)
+        return float(curve.std() / curve.mean())
+
+    along_frames = variation((arms // frames, frames))
+    along_groups = variation((frames, arms // frames))
+    if along_frames < 4 * along_groups:
+        raise RuntimeError(
+            "the arm axis is not periodic in the frame with period "
+            f"{frames} ({along_frames:.3f} against {along_groups:.3f}); the "
+            "acquisition is not laid out the way this expects"
+        )
+
+    opening = np.abs(np.asarray(raw[:, 0, :64])).mean(axis=1)
+    peak = int(opening[: 2 * (raw.shape[0] - points)].argmax())
+    if peak > 16:
+        raise RuntimeError(
+            f"the readout peaks at sample {peak}, so it does not open at "
+            "k = 0 and the trajectory's points are not the leading ones"
+        )
+    return "shot-major", 0
 
 
 def prepare(*, force: bool = False) -> Acquisition:
@@ -176,22 +231,8 @@ def prepare(*, force: bool = False) -> Acquisition:
     print(f"raw {raw.shape} {raw.dtype}, mapped not loaded")
     order, offset = _resolve_layout(raw, trajectory)
 
-    points = trajectory.shape[2]
-    channels = raw.shape[1]
-    gathered = np.empty((channels, FRAMES, SHOTS, points), dtype=np.complex64)
-    for frame in range(FRAMES):
-        for shot in range(SHOTS):
-            index = (
-                frame * raw.shape[2] // FRAMES + shot
-                if order == "frame-major"
-                else shot * FRAMES + frame
-            )
-            gathered[:, frame, shot] = raw[offset : offset + points, :, index].T
-    print(f"  gathered {gathered.shape}, {gathered.nbytes / 2**30:.2f} GiB")
-
-    radius = np.linalg.norm(trajectory, axis=-1)
-    kspace = _compress_coils(gathered, radius)
-    del gathered
+    assert order == "shot-major"
+    kspace = _gather_compressed(raw, offset, trajectory.shape[2])
 
     np.savez(cache, kspace=kspace, trajectory=trajectory, density=density, basis=basis)
     print(f"  cached to {cache}")

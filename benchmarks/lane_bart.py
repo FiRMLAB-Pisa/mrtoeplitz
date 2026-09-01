@@ -35,7 +35,10 @@ def write_cfl(stem: Path, array: np.ndarray) -> None:
     with stem.with_suffix(".hdr").open("w") as handle:
         handle.write("# Dimensions\n" + " ".join(str(d) for d in dims) + "\n")
     with stem.with_suffix(".cfl").open("wb") as handle:
-        array.astype(np.complex64).T.ravel(order="F").T.tofile(handle)
+        # The header states the dimensions in BART's order, so the data has to
+        # be written in it too. Writing C-ordered bytes under that header hands
+        # BART every array transposed.
+        array.astype(np.complex64).ravel(order="F").tofile(handle)
 
 
 def stage(acquisition, maps, size: int, root: Path) -> dict[str, Path]:

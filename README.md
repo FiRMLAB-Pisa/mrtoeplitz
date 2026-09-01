@@ -14,30 +14,26 @@ The cost is memory: the transfer lives on a grid twice the image in every
 dimension. This package spends accuracy digits to buy that memory back, and
 gets as close to the two-FFT floor as it can.
 
-**From the reference implementations** (BART, MRFingerprintingRecon.jl): the
+From the reference implementations (BART, MRFingerprintingRecon.jl): the
 gridded construction, support compression, and the parity decomposition of the
 doubled grid — on by default here, so the doubled grid is never materialised.
+Added here:
 
-**Added here:**
-
-- **Low memory by default** — the packed lane, not resident banks on the
-  doubled grid, so the operator's footprint stays predictable and the rest of
-  a reconstruction keeps its room
-- **bfloat16 transfers**, halving what the card holds and what crosses the bus
-- **Dual-stream host staging** — a transfer larger than the card stays in
-  pinned host memory and arrives in chunks, the copy of one overlapping the
-  multiply of the one before
+- **Nothing resident that need not be** — the transfer stays on the host and is
+  streamed across in chunks, on the build and the apply alike, so the largest
+  thing in a reconstruction never occupies the card
+- **bfloat16 transfers**, halving what crosses the bus
+- **Coil sensitivities as k-space kernels**, riesling's low-memory idea: one
+  map is expanded at a time, never a bank
 - **Fused apply lanes** — Triton on CUDA, runtime-dispatched AVX2/AVX512 on CPU
-- **Coil sensitivities as k-space kernels**, riesling's low-memory idea
 - **Differentiable**: the operator is Hermitian, so backward is one more
   application and keeps nothing
-- Multi-GPU coil splitting, one gridding plan per build, reused transform banks
+- Scalar, subspace and Cartesian-subspace transfers; multi-GPU coil splitting
 
-Scalar, subspace and Cartesian-subspace transfers, on CPU and CUDA. FINUFFT
-and CUFINUFFT are called directly, so a CUDA build never leaves Torch. Applying
-a transfer depends on Torch alone.
+FINUFFT and CUFINUFFT are called directly, so a CUDA build never leaves Torch.
+Applying a transfer depends on Torch alone.
 
-## Install
+## Quick Start
 
 ```bash
 pip install mrtoeplitz          # applying a transfer
@@ -45,119 +41,83 @@ pip install mrtoeplitz[nufft]   # building one on the host: FINUFFT
 pip install mrtoeplitz[cuda]    # building one on a device: CUFINUFFT
 ```
 
-## Usage
-
 Trajectories are in normalized k-space: a sample at `-0.5` is grid location
 `-kN/2` of a grid of size `kN`. Which library grids the point spread function
-follows the trajectory's device, and a transfer moves afterwards with `.to()`.
-
-### A normal operator from a trajectory
+follows the trajectory's device.
 
 ```python
 import mrtoeplitz as mt
 
-kernel = mt.scalar_kernel(trajectory, image_shape=(256, 256))  # (shots, points, axes)
+# normal operator from a trajectory, (shots, points, axes)
+kernel = mt.scalar_kernel(trajectory, image_shape=(256, 256))
 normal = kernel(image[None, None])  # (batch, rank, *image_shape)
-```
 
-![a normal operator against the NUFFT pair it replaces](examples/figures/scalar.png)
-
-[`examples/scalar.ipynb`](examples/scalar.ipynb)
-
-### Subspace
-
-One gridding transform per basis **pair**, over every frame's samples at once.
-Frames sharing a trajectory are grouped first.
-
-```python
+# subspace: one gridding transform per basis pair, never one per frame
 kernel = mt.subspace_kernel(trajectory, basis, image_shape=(256, 256))
-```
 
-`trajectory` is `(shots, points, axes)` when frames share one and
-`(frames, shots, points, axes)` when they differ; `basis` is `(frames, rank)`
-or its transpose. The frames axis is contrasts for qMRI and time for a dynamic
-scan.
-
-![a subspace normal against the definition](examples/figures/subspace.png)
-
-[`examples/subspace.ipynb`](examples/subspace.ipynb)
-
-### Cartesian subspace
-
-No gridding and no doubled grid — the normal is the sampling mask itself.
-
-```python
+# Cartesian subspace: the sampling mask is the transfer, nothing is gridded
 kernel = mt.cartesian_subspace_kernel(masks, basis)
-```
 
-![the Cartesian subspace normal](examples/figures/cartesian.png)
-
-[`examples/cartesian.ipynb`](examples/cartesian.ipynb)
-
-### Coil sensitivities
-
-```python
+# coil sensitivities, one coil at a time
 normal = mt.apply_sense(kernel, image, maps)
-```
 
-A sensitivity is smooth — which is why a calibration is solved on a
-low-resolution ACS region in the first place. What NLINV solves for *is* a
-small array of k-space coefficients; the dense map is that array zero-padded
-and transformed. `CoilKernels` holds the coefficients and defers the padding
-to the coils a call asks for, which a SENSE normal already reads one batch at
-a time. Nothing is approximated, and at 320³ with 48 channels it is 12.6 GB of
-maps against a fraction of a megabyte.
-
-```python
+# sensitivities as k-space kernels: what NLINV solves for, expanded on demand
 coil_kernels = mt.CoilKernels(calibration, image_shape=(320, 320, 320))
 normal = mt.apply_sense(kernel, image, coil_kernels)
+
+# dense maps instead: the smallest kernel holding them to a tolerance
+coil_kernels = mt.CoilKernels.from_maps(maps, tolerance=1e-3)
+
+# a transfer on the host is streamed; moving it across keeps it there
+kernel.to("cuda")
+
+# gradients, for an unrolled network
+kernel(image.requires_grad_()).abs().sum().backward()
 ```
 
-If only dense maps survive, `from_maps(maps, tolerance=1e-3)` finds the
-smallest kernel that holds them to that — 114× on NLINV maps, 2× on ESPIRiT's,
-and a refusal for a bank with no such kernel.
+## Examples
 
-![sensitivities as k-space kernels](examples/figures/coil_kernels.png)
-
-[`examples/coil_kernels.ipynb`](examples/coil_kernels.ipynb)
-
-### Streaming a transfer that will not fit
-
-The policy is a property of the transfer, so it is given once when the kernel
-is built and calling it streams.
-
-```python
-policy = mt.CudaStreaming(streams=2)
-kernel = mt.scalar_kernel(trajectory, (320, 320, 320), streaming=policy)
-normal = kernel(image)
-```
-
-![a streamed transfer against a resident one](examples/figures/streaming.png)
-
-[`examples/streaming.ipynb`](examples/streaming.ipynb)
-
-### Gradients
-
-```python
-image = torch.randn(1, 1, 256, 256, dtype=torch.complex64, requires_grad=True)
-kernel(image).abs().sum().backward()
-```
-
-![gradients through the normal operator](examples/figures/unrolled.png)
-
-[`examples/unrolled.ipynb`](examples/unrolled.ipynb)
+| | | |
+|---|---|---|
+| [`scalar.ipynb`](examples/scalar.ipynb) | a normal operator against the NUFFT pair it replaces | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/scalar.ipynb) |
+| [`subspace.ipynb`](examples/subspace.ipynb) | a subspace normal against the definition | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/subspace.ipynb) |
+| [`cartesian.ipynb`](examples/cartesian.ipynb) | the Cartesian subspace normal | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/cartesian.ipynb) |
+| [`coil_kernels.ipynb`](examples/coil_kernels.ipynb) | sensitivities as k-space kernels | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/coil_kernels.ipynb) |
+| [`streaming.ipynb`](examples/streaming.ipynb) | a streamed transfer against a resident one | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/streaming.ipynb) |
+| [`unrolled.ipynb`](examples/unrolled.ipynb) | gradients through the normal operator | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/unrolled.ipynb) |
 
 ## Benchmark
 
-Peak memory and runtime against the FFT floor, BART,
-MRFingerprintingRecon.jl and torchkbnufft, on the Deli-CS 3D
-spiral-projection MRF dataset.
+One application of the subspace normal operator for a 3D spiral-projection MRF
+scan, on the [Deli-CS](https://zenodo.org/records/7697373) six-minute
+acquisition: 500 frames of 48 shots, 48 channels compressed to 8, rank 4, on a
+256³ grid. Four coefficients of `A^H y` and of one normal-operator application
+on top of it, at the level of the lateral ventricles.
 
-*Not yet run — see [`benchmarks/`](benchmarks/).*
+![four subspace coefficients on both devices](examples/figures/benchmark.png)
 
-## References
+Neither row is a reconstruction — the operator has no regulariser and does not
+converge to anything. What it shows is the operator applied to real data on
+both devices, agreeing to `4e-4`, which is what the gridding tolerance allows.
 
-The packages this one is measured against, and the work it implements.
+| | RAM | VRAM | `A^H y` | kernel creation | kernel apply |
+|---|---|---|---|---|---|
+| CPU | 17.7 GiB | — | 52.0 s | 99.7 s | 58.4 s |
+| CUDA | 14.7 GiB | 7.7 GiB | 15.4 s | 95.4 s | 6.9 s |
+| FFT floor, CUDA | 0.6 GiB | 3.1 GiB | — | — | 2.4 s |
+| FFT floor, CPU | 3.5 GiB | — | — | — | 23.0 s |
+
+The floor is what the transforms alone cost: `coils x rank` volumes, one
+forward and one inverse each, with the transfer multiply, the sensitivities
+and every copy taken as free. Nothing can beat it, and the apply here is 2.9x
+of it on the device and 2.5x on the host. The transfer is never resident: it is
+2.9 GiB, and it stays on the host and streams.
+
+Regenerate with `python benchmarks/run.py` and `python benchmarks/figure.py`;
+see [`benchmarks/`](benchmarks/) for what each lane does. Runtimes are from one
+laptop RTX 4060 and are secondary — the memory is the reproducible part.
+
+## Related Works
 
 - **BART** — <https://mrirecon.github.io/bart/>. `compute_psf_int` is the
   gridded construction used here, and `--nufft-conf compress-psf` the support
@@ -168,7 +128,7 @@ The packages this one is measured against, and the work it implements.
 - Maatman IT, Blumenthal M, Scholand N, Flassbeck S, Uecker M, Assländer J.
   *Memory-Efficient Iterative Subspace Reconstructions on GPUs for
   Non-Cartesian MRI.* ISMRM abstract 508-02-001. Reduces Toeplitz-embedded
-  subspace memory ~8× through point-spread-function symmetry and compact
+  subspace memory ~8x through point-spread-function symmetry and compact
   k-space support, with implementations in BART and Julia.
 - ISMRM 2023 — <https://perso.crans.org/comby/ISMRM2023/ISMRM%202023.html>.
   The parity (polyphase) decomposition of the doubled grid, which is the
@@ -179,6 +139,11 @@ The packages this one is measured against, and the work it implements.
   [doi:10.21105/joss.03500](https://doi.org/10.21105/joss.03500). Its
   low-memory mode is the origin of holding sensitivities as k-space kernels
   rather than as maps.
+- **Deli-CS** — Iyer S, Schauman SS, Sandino CM, et al. *Deep learning
+  initialized compressed sensing (Deli-CS) in volumetric spatio-temporal
+  subspace reconstruction.* MAGMA 37, 961-977 (2024).
+  [doi:10.1007/s10334-024-01205-3](https://doi.org/10.1007/s10334-024-01205-3).
+  The acquisition the benchmark runs on.
 
 ## Development
 
