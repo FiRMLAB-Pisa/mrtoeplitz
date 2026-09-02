@@ -15,7 +15,12 @@ from types import SimpleNamespace
 from typing import Any
 
 from ._coils import CoilKernels
-from ._kernel import CompactToeplitzKernel, _device_is_full, as_torch
+from ._kernel import (
+    CompactToeplitzKernel,
+    PolyphaseToeplitzKernel,
+    _device_is_full,
+    as_torch,
+)
 from ._streaming import CudaStreaming
 
 
@@ -114,7 +119,18 @@ def _default_streaming(kernel: CompactToeplitzKernel, image: Any) -> Any:
     """
     if image.device.type != "cuda" or not _transfer_is_on_the_host(kernel):
         return None
-    return CudaStreaming(device=str(image.device))
+    torch = import_module("torch")
+    count = torch.cuda.device_count()
+    if count <= 1:
+        return CudaStreaming(device=str(image.device))
+    # Every visible card, with the image's own first: that one owns the answer
+    # the others are summed into, so it is the one that never has to move it.
+    index = image.device.index or 0
+    order = [index, *(other for other in range(count) if other != index)]
+    return CudaStreaming(
+        device=f"cuda:{index}",
+        devices=tuple(f"cuda:{other}" for other in order),
+    )
 
 
 def _streamed_extent(kernel: CompactToeplitzKernel) -> tuple[int, tuple[int, ...]]:
@@ -220,6 +236,144 @@ def _apply_sense_streamed(
             import_module("torch").cuda.empty_cache()
 
 
+def _shares(count: int, parts: int) -> list[tuple[int, int]]:
+    """Split ``count`` into ``parts`` spans that differ by at most one."""
+    edges = [(index * count) // parts for index in range(parts + 1)]
+    return [
+        (edges[index], edges[index + 1])
+        for index in range(parts)
+        if edges[index] < edges[index + 1]
+    ]
+
+
+def _divided_across_devices(
+    kernel: CompactToeplitzKernel,
+    image: Any,
+    maps: Any,
+    streaming: Any,
+    *,
+    batched_maps: bool,
+    n_coils: int,
+) -> Any | None:
+    """Divide one application between the devices, along the cheapest axis.
+
+    Three axes will divide, and they do not cost the same.
+
+    The batch is free: its entries are independent applications and there is
+    nothing to sum at the end, so it goes first wherever there is more than one
+    -- a stack of slices, which is what a two-dimensional acquisition is.
+
+    Failing that, the parities. Each component of a transfer filed by parity
+    owns its own share of the transfer, so dividing there *divides the
+    transfer*: a card holds the components it was given and none of the rest.
+    What it costs is one sum at the end, over a volume per coefficient.
+
+    Coils divide too, and cost the same sum, but every card then needs the
+    whole transfer rather than a share of it. So that is the last resort, for a
+    transfer that has no parities to divide.
+
+    Returns None when no axis divides, which is when the caller should go on
+    and apply it here.
+    """
+    parts = streaming.device_count
+    if image.shape[0] > 1:
+        return _batches_split_across_devices(kernel, image, maps, streaming)
+    components = getattr(kernel, "components", None)
+    if components is not None and len(components) > 1:
+        return _parities_split_across_devices(kernel, image, maps, streaming)
+    if n_coils > 1 and parts > 1:
+        return _coils_split_across_devices(
+            kernel,
+            image,
+            maps,
+            streaming,
+            batched_maps=batched_maps,
+            n_coils=n_coils,
+        )
+    return None
+
+
+def _across_devices(streaming: Any, shares: list[tuple[int, int]], share: Any) -> list:
+    """Run one share per device, at the same time."""
+    devices = streaming.torch_devices[: len(shares)]
+    with ThreadPoolExecutor(max_workers=len(devices)) as workers:
+        return list(workers.map(share, range(len(devices))))
+
+
+def _batches_split_across_devices(
+    kernel: CompactToeplitzKernel,
+    image: Any,
+    maps: Any,
+    streaming: Any,
+) -> Any:
+    """Apply to a stack of independent images, a share of them per device.
+
+    Nothing is summed: each entry of the batch is its own application, so the
+    shares are answered where they are computed and gathered back in order.
+    """
+    torch = import_module("torch")
+    parts = min(streaming.device_count, image.shape[0])
+    shares = _shares(image.shape[0], parts)
+    devices = streaming.torch_devices[:parts]
+
+    def share(position: int) -> Any:
+        device = devices[position]
+        start, stop = shares[position]
+        return _apply_sense(
+            kernel.for_device(device),
+            image[start:stop].to(device),
+            maps.to(device),
+            streaming=streaming.for_device(device),
+        )
+
+    parts_done = _across_devices(streaming, shares, share)
+    return torch.cat([part.to(image.device) for part in parts_done])
+
+
+def _parities_split_across_devices(
+    kernel: Any,
+    image: Any,
+    maps: Any,
+    streaming: Any,
+) -> Any:
+    """Sum an application over the parities, a share of them per device.
+
+    A share is a transfer in its own right over the same image grid, so each
+    card is given one and holds only the components in it. The normalisation a
+    parity-filed transfer carries is over the whole doubled grid rather than
+    over the components present, so each share answers on the same scale and
+    the shares add.
+    """
+    parts = min(streaming.device_count, len(kernel.components))
+    shares = _shares(len(kernel.components), parts)
+    devices = streaming.torch_devices[:parts]
+
+    def share(position: int) -> Any:
+        device = devices[position]
+        start, stop = shares[position]
+        held = PolyphaseToeplitzKernel(
+            [
+                (parity, part.for_device(device))
+                for parity, part in kernel.components[start:stop]
+            ],
+            kernel.image_shape,
+            kernel.rank,
+            truncation_bound=kernel.truncation_bound,
+        )
+        return _apply_sense(
+            held,
+            image.to(device),
+            maps.to(device),
+            streaming=streaming.for_device(device),
+        )
+
+    parts_done = _across_devices(streaming, shares, share)
+    total = parts_done[0].to(image.device)
+    for part in parts_done[1:]:
+        total.add_(part.to(image.device))
+    return total
+
+
 def _apply_sense(
     kernel: CompactToeplitzKernel,
     image: Any,
@@ -286,11 +440,10 @@ def _apply_sense(
     if (
         streaming is not None
         and streaming.device_count > 1
-        and n_coils > 1
         and left_factors is None
         and right_factors is None
     ):
-        return _coils_split_across_devices(
+        divided = _divided_across_devices(
             kernel,
             image,
             maps,
@@ -298,6 +451,8 @@ def _apply_sense(
             batched_maps=batched_maps,
             n_coils=n_coils,
         )
+        if divided is not None:
+            return divided
     if (
         streaming is not None
         and not batched_maps

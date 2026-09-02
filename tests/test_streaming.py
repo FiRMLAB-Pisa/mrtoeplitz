@@ -416,3 +416,100 @@ def test_a_kernel_gives_the_device_back_when_it_is_released(sense):
     assert held > 0, "an application is expected to keep its working buffers"
     kernel.release()
     assert resident() == before
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_the_parities_of_a_transfer_divide_and_add(radial, image):
+    """A share of the parities is a transfer, and the shares add.
+
+    This is what lets the components be dealt out to several devices: each is
+    a transfer over the image grid in its own right, and the normalisation one
+    carries is over the whole doubled grid rather than over the components
+    present, so shares answer on one scale however they are cut.
+    """
+    from mrtoeplitz._kernel import PolyphaseToeplitzKernel
+
+    torch.manual_seed(0)
+    trajectory = torch.as_tensor(radial(n_spokes=48, n_samples=64)).cuda()
+    basis = torch.linalg.qr(torch.randn(48, 2))[0]
+    kernel = mt.subspace_kernel(trajectory, basis, (16, 16))
+    maps = torch.randn(3, 16, 16, dtype=torch.complex64).cuda()
+    x = torch.randn(1, 2, 16, 16, dtype=torch.complex64).cuda()
+
+    def share(start, stop):
+        return PolyphaseToeplitzKernel(
+            kernel.components[start:stop],
+            kernel.image_shape,
+            kernel.rank,
+            truncation_bound=kernel.truncation_bound,
+        )
+
+    whole = mt.apply_sense(kernel, x, maps)
+    parts = len(kernel.components)
+    for cuts in ((parts // 2,), (1, parts - 1)):
+        edges = (0, *cuts, parts)
+        total = sum(
+            mt.apply_sense(share(edges[i], edges[i + 1]), x, maps)
+            for i in range(len(edges) - 1)
+        )
+        error = torch.linalg.vector_norm(total - whole) / torch.linalg.vector_norm(
+            whole
+        )
+        assert float(error) < 1e-5, f"cut at {cuts}"
+
+
+@pytest.mark.cuda
+@cuda_only
+def test_the_batch_divides_with_nothing_to_sum(radial):
+    """Entries of the batch are independent applications, so they only join."""
+    torch.manual_seed(0)
+    trajectory = torch.as_tensor(radial(n_spokes=48, n_samples=64)).cuda()
+    basis = torch.linalg.qr(torch.randn(48, 2))[0]
+    kernel = mt.subspace_kernel(trajectory, basis, (16, 16))
+    maps = torch.randn(3, 16, 16, dtype=torch.complex64).cuda()
+    x = torch.randn(3, 2, 16, 16, dtype=torch.complex64).cuda()
+
+    whole = mt.apply_sense(kernel, x, maps)
+    joined = torch.cat(
+        [mt.apply_sense(kernel, x[start : start + 1], maps) for start in range(3)]
+    )
+    error = torch.linalg.vector_norm(joined - whole) / torch.linalg.vector_norm(whole)
+    assert float(error) < 1e-5
+
+
+def test_the_cheapest_axis_that_divides_is_the_one_taken(monkeypatch):
+    """Batch before parities before coils, and none of them when one will do.
+
+    The batch costs no sum at all, the parities divide the transfer between the
+    cards, and coils make every card hold the whole of it. So they are tried in
+    that order, and the choice does not depend on having the cards to hand.
+    """
+    from mrtoeplitz import _sense
+
+    taken = []
+    for name in ("_batches", "_parities", "_coils"):
+        monkeypatch.setattr(
+            _sense,
+            f"{name}_split_across_devices",
+            lambda *a, name=name, **k: taken.append(name) or "answered",
+        )
+
+    class Policy:
+        device_count = 4
+
+    class Filed:
+        components = [(0, None)] * 8
+
+    def choose(kernel, batch, coils):
+        taken.clear()
+        image = torch.zeros(batch, 1, 4, 4)
+        _sense._divided_across_devices(
+            kernel, image, None, Policy(), batched_maps=False, n_coils=coils
+        )
+        return taken
+
+    assert choose(Filed(), batch=3, coils=8) == ["_batches"]
+    assert choose(Filed(), batch=1, coils=8) == ["_parities"]
+    assert choose(object(), batch=1, coils=8) == ["_coils"]
+    assert choose(object(), batch=1, coils=1) == []

@@ -28,7 +28,10 @@ Added here:
 - **Fused apply lanes** — Triton on CUDA, runtime-dispatched AVX2/AVX512 on CPU
 - **Differentiable**: the operator is Hermitian, so backward is one more
   application and keeps nothing
-- Scalar, subspace and Cartesian-subspace transfers; multi-GPU coil splitting
+- **Every card, by default** — an application divides along whichever axis is
+  cheapest: the batch when there is one, else the parities, which gives each
+  card a share of the transfer rather than a copy of it
+- Scalar, subspace and Cartesian-subspace transfers
 
 FINUFFT and CUFINUFFT are called directly, so a CUDA build never leaves Torch.
 Applying a transfer depends on Torch alone.
