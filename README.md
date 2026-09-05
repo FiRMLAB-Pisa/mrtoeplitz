@@ -82,12 +82,12 @@ kernel(image.requires_grad_()).abs().sum().backward()
 
 | | | |
 |---|---|---|
-| [`scalar.ipynb`](examples/scalar.ipynb) | a normal operator against the NUFFT pair it replaces | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/scalar.ipynb) |
-| [`subspace.ipynb`](examples/subspace.ipynb) | a subspace normal against the definition | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/subspace.ipynb) |
-| [`cartesian.ipynb`](examples/cartesian.ipynb) | the Cartesian subspace normal | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/cartesian.ipynb) |
-| [`coil_kernels.ipynb`](examples/coil_kernels.ipynb) | sensitivities as k-space kernels | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/coil_kernels.ipynb) |
-| [`streaming.ipynb`](examples/streaming.ipynb) | a streamed transfer against a resident one | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/streaming.ipynb) |
-| [`unrolled.ipynb`](examples/unrolled.ipynb) | gradients through the normal operator | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/unrolled.ipynb) |
+| [`01-scalar`](examples/01-scalar.ipynb) | a normal operator against the NUFFT pair it replaces | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/01-scalar.ipynb) |
+| [`02-subspace`](examples/02-subspace.ipynb) | a subspace normal against the definition | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/02-subspace.ipynb) |
+| [`03-cartesian`](examples/03-cartesian.ipynb) | the Cartesian subspace normal | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/03-cartesian.ipynb) |
+| [`04-coil_kernels`](examples/04-coil_kernels.ipynb) | sensitivities as k-space kernels | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/04-coil_kernels.ipynb) |
+| [`05-streaming`](examples/05-streaming.ipynb) | a streamed transfer against a resident one | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/05-streaming.ipynb) |
+| [`06-unrolled`](examples/06-unrolled.ipynb) | gradients through the normal operator | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/06-unrolled.ipynb) |
 
 ## Benchmark
 
@@ -162,6 +162,7 @@ laptop RTX 4060 and are secondary — the memory is the reproducible part.
 pip install -e .[dev]
 bash scripts/format_and_lint.sh
 pytest -q
+bash scripts/build_examples.sh    # rebuild the notebooks and their figures
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -107,7 +107,9 @@ line-length = 88
 # tree, so a command that reads as read-only is not. `format_and_lint.sh`
 # passes --fix explicitly when it means it.
 fix = false
-extend-exclude = ["docs/**", "examples/**"]
+# The example notebooks are generated from the scripts beside them, so the
+# script is what is linted.
+extend-exclude = ["docs/**", "examples/*.ipynb"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -129,6 +131,11 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D", "S101", "ARG"]
 "benchmarks/**" = ["D", "S101", "T201"]
+# Examples are code: they run as scripts and lint with everything else. What
+# they are not is a library -- cells import where they are needed, print their
+# results, shell out to pip so the notebook works in Colab, and name a one-line
+# metric with a lambda where a def would be a paragraph.
+"examples/**" = ["D", "E402", "T201", "S101", "S603", "INP001", "E731"]
 "__init__.py" = ["D104", "F401"]
 
 [tool.ruff.lint.pydocstyle]
