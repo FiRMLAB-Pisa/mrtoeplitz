@@ -89,7 +89,7 @@ kernel(image.requires_grad_()).abs().sum().backward()
 | [`05-streaming`](examples/05-streaming.ipynb) | a streamed transfer against a resident one | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/05-streaming.ipynb) |
 | [`06-unrolled`](examples/06-unrolled.ipynb) | gradients through the normal operator | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/FiRMLAB-Pisa/mrtoeplitz/blob/main/examples/06-unrolled.ipynb) |
 
-## Benchmark
+## What it costs
 
 One application of the subspace normal operator for a 3D spiral-projection MRF
 scan, on the [Deli-CS](https://zenodo.org/records/7697373) six-minute

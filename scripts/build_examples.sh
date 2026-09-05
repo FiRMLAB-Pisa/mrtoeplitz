@@ -21,7 +21,7 @@ check=0
 # another environment would install this package from PyPI and document that
 # one instead of the tree it was built from.
 if [[ $check -eq 0 ]]; then
-    "$PYTHON_BIN" -m ipykernel install --user --name "$KERNEL" >/dev/null 2>&1
+    "$PYTHON_BIN" -m ipykernel install --user --name "$KERNEL" >/dev/null
 fi
 
 for script in examples/[0-9]*.py; do
